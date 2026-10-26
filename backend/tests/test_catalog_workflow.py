@@ -127,6 +127,8 @@ def _payload(lines, **overrides):
 def _line(description, price, quantity, *, article_id=None, currency="USD", unit="piece"):
     return {
         "positionDescription": description,
+        "commodityGroupId": 31,
+        "classificationSource": "manual",
         "unitPrice": price,
         "amount": quantity,
         "unit": unit,

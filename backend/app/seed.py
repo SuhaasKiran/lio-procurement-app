@@ -150,6 +150,27 @@ def seed_organizations_and_accounts(db: Session) -> tuple[int, int]:
             db.add(org)
             db.flush()
             orgs_created += 1
+        if org_slug == "acme" and "commodity_rules" not in (org.settings or {}):
+            commodity_group_ids = {name: group_id for group_id, _, name in COMMODITY_GROUPS}
+            org_settings = dict(org.settings or {})
+            org_settings["commodity_rules"] = [
+                {
+                    "id": "cable-ties-electrical-engineering",
+                    "guidance": "Book cable ties, zip ties, and similar cable fastening products in Electrical Engineering.",
+                    "commodity_group_id": 11,
+                },
+                {
+                    "id": "printer-toner-it-hardware",
+                    "guidance": "Book printer toner and toner cartridges in IT Hardware.",
+                    "commodity_group_id": commodity_group_ids["IT Hardware"],
+                },
+                {
+                    "id": "small-software-subscriptions-office-supplies",
+                    "guidance": "Book small software or SaaS subscriptions in Office Supplies. If the subscription is not clearly small, use the best matching standard category and request review when uncertain.",
+                    "commodity_group_id": commodity_group_ids["Office Supplies"],
+                },
+            ]
+            org.settings = org_settings
         for email, full_name, role in accounts:
             if db.scalar(select(User).where(User.email == email)) is not None:
                 continue

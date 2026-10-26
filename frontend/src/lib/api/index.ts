@@ -45,8 +45,15 @@ export interface MyOrganization {
 // Request fields an org may optionally mark as required (see backend settings).
 export type ConfigurableRequiredField = 'vat_id' | 'department';
 
+export interface OrganizationCommodityRule {
+  id: string;
+  guidance: string;
+  commodity_group_id: number;
+}
+
 export interface OrganizationSettings {
   required_fields: ConfigurableRequiredField[];
+  commodity_rules: OrganizationCommodityRule[];
 }
 
 export interface MembersResponse {
@@ -63,6 +70,8 @@ export interface OrderLineInput {
   currency: string;
   catalogArticleId?: string | null;
   catalogArticleNumber?: string | null;
+  commodityGroupId?: number | null;
+  classificationSource?: 'llm' | 'manual' | 'legacy';
 }
 
 export interface AdjustmentInput {
@@ -82,7 +91,7 @@ export interface CreateRequestInput {
   titleShortDescription: string;
   vendorName: string;
   vatId: string;
-  commodityGroupId: number;
+  commodityGroupId?: number | null;
   totalCost: number;
   sourceQuoteCurrency?: string;
   department: string;
@@ -96,7 +105,7 @@ export interface UpdateRequestInput {
   title: string;
   vendorName: string;
   vatId: string;
-  commodityGroupId: number;
+  commodityGroupId?: number | null;
   totalCost: number;
   department: string;
   orderLines: OrderLineInput[];
@@ -112,8 +121,13 @@ export interface ExtractedVendorData {
   orderLines: OrderLineInput[];
   totalCost: number;
   adjustments: AdjustmentInput[];
+}
+
+export interface CategoryAssignment {
+  index: number;
   commodityGroupId: number | null;
-  commodityGroupName: string | null;
+  status: 'assigned' | 'needs_review';
+  error?: string | null;
 }
 
 export interface ExtractionResponse {
@@ -369,5 +383,8 @@ export const pdf = {
 export const extraction = {
   extract(text: string): Promise<ExtractionResponse> {
     return apiFetch('/extraction', { body: { text } });
+  },
+  classifyLines(lines: Array<{ positionDescription: string; totalPrice: number; currency: string }>): Promise<{ lines: CategoryAssignment[] }> {
+    return apiFetch('/extraction/classify-lines', { body: { lines } });
   },
 };

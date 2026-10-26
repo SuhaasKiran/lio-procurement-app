@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import * as api from '@/lib/api';
-import { Button, Input, Alert } from '@/components/base';
+import { Button, Input, Alert, TextArea } from '@/components/base';
 import type { OrganizationMemberWithProfile, OrganizationInvite } from '@/types/database';
 
 type Tab = 'members' | 'settings';
@@ -26,7 +26,10 @@ export default function OrganizationPage() {
   const [organizationName, setOrganizationName] = useState<string>('');
   const [role, setRole] = useState<api.MemberRole | null>(null);
   const [requiredFields, setRequiredFields] = useState<api.ConfigurableRequiredField[]>([]);
+  const [commodityRules, setCommodityRules] = useState<api.OrganizationCommodityRule[]>([]);
+  const [commodityRulesText, setCommodityRulesText] = useState('[]');
   const [savingSettings, setSavingSettings] = useState(false);
+  const [savingRules, setSavingRules] = useState(false);
 
   useEffect(() => {
     loadOrganization();
@@ -48,6 +51,8 @@ export default function OrganizationPage() {
       setMembers(result.members);
       setInvites(result.invites);
       setRequiredFields(settings.required_fields);
+      setCommodityRules(settings.commodity_rules || []);
+      setCommodityRulesText(JSON.stringify(settings.commodity_rules || [], null, 2));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load organization');
     }
@@ -103,7 +108,7 @@ export default function OrganizationPage() {
     setError('');
     setSuccess('');
     try {
-      const saved = await api.organizations.updateSettings({ required_fields: next });
+      const saved = await api.organizations.updateSettings({ required_fields: next, commodity_rules: commodityRules });
       setRequiredFields(saved.required_fields);
       setSuccess('Settings updated');
     } catch (err) {
@@ -111,6 +116,33 @@ export default function OrganizationPage() {
       await loadOrganization(); // revert to server state
     }
     setSavingSettings(false);
+  };
+
+  const saveCommodityRules = async () => {
+    setError('');
+    setSuccess('');
+    let parsed: api.OrganizationCommodityRule[];
+    try {
+      parsed = JSON.parse(commodityRulesText) as api.OrganizationCommodityRule[];
+      if (!Array.isArray(parsed)) throw new Error('Rules must be a JSON array.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Enter valid JSON for the rules.');
+      return;
+    }
+    setSavingRules(true);
+    try {
+      const saved = await api.organizations.updateSettings({
+        required_fields: requiredFields,
+        commodity_rules: parsed,
+      });
+      setCommodityRules(saved.commodity_rules || []);
+      setCommodityRulesText(JSON.stringify(saved.commodity_rules || [], null, 2));
+      setSuccess('Commodity rules saved.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save commodity rules.');
+    } finally {
+      setSavingRules(false);
+    }
   };
 
   if (loading) {
@@ -267,6 +299,7 @@ export default function OrganizationPage() {
       )}
 
       {tab === 'settings' && (
+        <div className="space-y-6">
         <div className="lio-card p-6">
           <h2 className="text-xl font-semibold tracking-tight text-ink">Request Settings</h2>
           <p className="text-sm text-ink/55 mt-1 mb-4">
@@ -283,7 +316,7 @@ export default function OrganizationPage() {
                   <input
                     type="checkbox"
                     checked={checked}
-                    disabled={savingSettings}
+                    disabled={savingSettings || savingRules}
                     onChange={() => toggleRequiredField(field.key)}
                     className="h-4 w-4 accent-accent-deep"
                   />
@@ -292,6 +325,32 @@ export default function OrganizationPage() {
               );
             })}
           </div>
+        </div>
+        <div className="lio-card p-6">
+          <h2 className="text-xl font-semibold tracking-tight text-ink">Commodity Rules</h2>
+          <p className="text-sm text-ink/55 mt-1 mb-4">
+            Describe how this organization wants items categorized. The AI uses these rules when it classifies each line.
+          </p>
+          <TextArea
+            aria-label="Organization commodity rules JSON"
+            value={commodityRulesText}
+            onChange={(event) => setCommodityRulesText(event.target.value)}
+            rows={12}
+            disabled={savingRules || savingSettings}
+            className="font-mono text-sm"
+          />
+          <p className="mt-2 text-xs text-ink/50">
+            Each rule needs a unique id, guidance, and an existing commodity_group_id. Use the exact category you want the AI to choose.
+          </p>
+          <pre className="mt-2 overflow-x-auto rounded-lg bg-ink-800/[0.03] p-3 text-xs text-ink/70">{`[
+  { "id": "printer-toner", "guidance": "Book toner cartridges as IT Hardware.", "commodity_group_id": 2001 }
+]`}</pre>
+          <div className="mt-4 flex justify-end">
+            <Button onClick={saveCommodityRules} disabled={savingRules || savingSettings}>
+              {savingRules ? 'Saving…' : 'Save commodity rules'}
+            </Button>
+          </div>
+        </div>
         </div>
       )}
     </div>

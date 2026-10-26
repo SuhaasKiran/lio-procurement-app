@@ -78,6 +78,28 @@ function buildRequestGroups(lines: OrderLine[], originalSupplier: string): Reque
   return [...groups.values()];
 }
 
+async function classifyLineItems(
+  lines: Array<{ positionDescription: string; totalPrice: number; currency: string }>
+): Promise<api.CategoryAssignment[]> {
+  const assignments: api.CategoryAssignment[] = [];
+  for (let start = 0; start < lines.length; start += 50) {
+    const batch = lines.slice(start, start + 50);
+    try {
+      const result = await api.extraction.classifyLines(batch);
+      assignments.push(...result.lines.map((item) => ({ ...item, index: item.index + start })));
+    } catch {
+      assignments.push(...batch.map((_, index) => ({
+        index: start + index,
+        commodityGroupId: null,
+        status: 'needs_review' as const,
+        error: 'Category service is unavailable.',
+      })));
+      break;
+    }
+  }
+  return assignments;
+}
+
 interface CatalogSuggestionsProps {
   description: string;
   selectedArticle: api.ArticleMatch | null;
@@ -222,7 +244,6 @@ export default function NewRequestPage() {
   const [vendorName, setVendorName] = useState('');
   const [vatId, setVatId] = useState('');
   const [department, setDepartment] = useState('');
-  const [commodityGroupId, setCommodityGroupId] = useState<number | null>(null);
   const [orderLines, setOrderLines] = useState<OrderLine[]>([]);
   const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
   // Kept separate from the calculated total so that quote mismatches are visible.
@@ -237,6 +258,7 @@ export default function NewRequestPage() {
   const [warning, setWarning] = useState('');
   const [formErrors, setFormErrors] = useState<FormErrors>({});
   const [extracting, setExtracting] = useState(false);
+  const [classifyingCategories, setClassifyingCategories] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -297,7 +319,6 @@ export default function NewRequestPage() {
       if (missingFields.includes('Vendor Name')) next.vendorName = 'Vendor name is required.';
       if (missingFields.includes('Tax ID') && requiresVatId) next.vatId = 'Tax ID is required.';
       if (missingFields.includes('Department') && requiresDepartment) next.department = 'Department is required.';
-      if (missingFields.includes('Commodity Group')) next.commodityGroupId = 'Commodity group is required.';
       if (missingFields.includes('Order Lines')) next.orderLines = 'Add at least one order line.';
       if (missingFields.includes('Total Cost')) next.quotedTotal = 'Quoted total is required.';
       return next;
@@ -331,7 +352,7 @@ export default function NewRequestPage() {
       setVendorName(extracted.vendorName || '');
       setVatId(extracted.vatId || '');
       setDepartment(extracted.department || '');
-      setOrderLines((extracted.orderLines || []).map((line) => ({
+      const extractedLines: OrderLine[] = (extracted.orderLines || []).map((line) => ({
         localId: newLineId(),
         positionDescription: line.positionDescription || '',
         unitPrice: Number(line.unitPrice) || 0,
@@ -343,15 +364,50 @@ export default function NewRequestPage() {
         catalogArticleNumber: null,
         selectedArticle: null,
         originalValues: null,
-      })));
+        commodityGroupId: null,
+        classificationSource: 'manual',
+      }));
+      setOrderLines(extractedLines);
+      if (extractedLines.length) {
+        setClassifyingCategories(true);
+        try {
+          const linesToClassify = extractedLines.filter((line) => line.positionDescription.trim().length > 0);
+          const assignments = await classifyLineItems(linesToClassify.map((line) => ({
+            positionDescription: line.positionDescription,
+            totalPrice: line.totalPrice,
+            currency: line.currency,
+          })));
+          const byLineId = new Map(linesToClassify.map((line, index) => [
+            line.localId,
+            { assignment: assignments.find((item) => item.index === index), line },
+          ]));
+          setOrderLines((current) => current.map((line) => {
+            const classified = byLineId.get(line.localId);
+            if (!classified
+              || line.positionDescription !== classified.line.positionDescription
+              || line.totalPrice !== classified.line.totalPrice) return line;
+            const assignment = classified.assignment;
+            return {
+              ...line,
+              commodityGroupId: assignment?.commodityGroupId ?? null,
+              classificationSource: assignment?.status === 'assigned' ? 'llm' : 'manual',
+            };
+          }));
+          if (assignments.some((item) => item.status !== 'assigned')) {
+            setWarning('Quote extracted. Some item categories need manual review.');
+          }
+        } catch {
+          setWarning('Quote extracted, but categories could not be assigned. Select them manually or retry classification.');
+        } finally {
+          setClassifyingCategories(false);
+        }
+      }
       setAdjustments((extracted.adjustments || []).map(normalizeAdjustment));
       setQuotedTotal(Number(extracted.totalCost) || 0);
       setQuoteCurrency(extracted.orderLines?.[0]?.currency || 'USD');
       setDiscrepancyNote('');
-      if (extracted.commodityGroupId) setCommodityGroupId(extracted.commodityGroupId);
-
       applyExtractionWarnings(extractionResult.missingFields);
-      setSuccess('Quote extracted. Review the fields, items, taxes, and discounts before creating the request.');
+      setSuccess('Quote extracted. Review the fields, item categories, taxes, and discounts before creating the request.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : '';
@@ -377,6 +433,8 @@ export default function NewRequestPage() {
         catalogArticleNumber: null,
         selectedArticle: null,
         originalValues: null,
+        commodityGroupId: null,
+        classificationSource: 'manual',
       },
     ]);
     clearFieldError('orderLines');
@@ -393,6 +451,14 @@ export default function NewRequestPage() {
     setOrderLines((current) => current.map((line, lineIndex) => {
       if (lineIndex !== index) return line;
       const updated = { ...line, [field]: value };
+      if (field === 'positionDescription') {
+        updated.commodityGroupId = null;
+        updated.classificationSource = 'manual';
+      }
+      if (field === 'unitPrice' || field === 'amount') {
+        updated.commodityGroupId = null;
+        updated.classificationSource = 'manual';
+      }
       if (field === 'currency') updated.currency = String(value).toUpperCase().slice(0, 3);
       if (field === 'unitPrice' || field === 'amount') {
         updated.totalPrice = roundCurrency(Number(updated.unitPrice) * Number(updated.amount));
@@ -427,6 +493,8 @@ export default function NewRequestPage() {
         catalogArticleNumber: article.article_number,
         selectedArticle: article,
         originalValues,
+        commodityGroupId: null,
+        classificationSource: 'manual',
       };
     }));
     if (orderLines.every((line, lineIndex) => lineIndex === index || line.selectedArticle !== null)) {
@@ -474,6 +542,45 @@ export default function NewRequestPage() {
       )));
   };
 
+  const classifyAllLines = async () => {
+    const targets = orderLines
+      .map((line) => ({ line }))
+      .filter(({ line }) => line.positionDescription.trim().length > 0);
+    if (!targets.length || classifyingCategories) return;
+    setClassifyingCategories(true);
+    setWarning('');
+    try {
+      const assignments = await classifyLineItems(targets.map(({ line }) => ({
+        positionDescription: line.positionDescription,
+        totalPrice: line.totalPrice,
+        currency: line.currency,
+      })));
+      const byLineId = new Map<string, { line: OrderLine; assignment: api.CategoryAssignment | undefined }>();
+      targets.forEach(({ line }, localIndex) => {
+        byLineId.set(line.localId, { line, assignment: assignments[localIndex] });
+      });
+      setOrderLines((current) => current.map((line) => {
+        const classified = byLineId.get(line.localId);
+        if (!classified || !classified.assignment
+          || line.positionDescription !== classified.line.positionDescription
+          || line.totalPrice !== classified.line.totalPrice) return line;
+        const { assignment } = classified;
+        return {
+          ...line,
+          commodityGroupId: assignment.commodityGroupId ?? null,
+          classificationSource: assignment.status === 'assigned' ? 'llm' : 'manual',
+        };
+      }));
+      if (assignments.some((item) => item.status !== 'assigned')) {
+        setWarning('Some item categories still need manual review.');
+      }
+    } catch {
+      setWarning('Category assignment is unavailable. Select categories manually and try again later.');
+    } finally {
+      setClassifyingCategories(false);
+    }
+  };
+
   const updateAdjustment = (id: string, change: Partial<Adjustment>) => {
     setAdjustments((current) => current.map((item) => item.id === id ? { ...item, ...change } : item));
   };
@@ -497,12 +604,12 @@ export default function NewRequestPage() {
     if (hasUnmatchedLines && !vendorName.trim()) next.vendorName = 'Vendor name is required for items kept from the quote.';
     if (hasUnmatchedLines && requiresVatId && !vatId.trim()) next.vatId = 'Tax ID is required for items kept from the quote.';
     if (requiresDepartment && !department.trim()) next.department = 'Department is required.';
-    if (!commodityGroupId) next.commodityGroupId = 'Commodity group is required.';
     if (!orderLines.length) next.orderLines = 'Add at least one order line.';
     orderLines.forEach((line, index) => {
       if (!line.positionDescription.trim()) next[`line-${index}-description`] = 'Description is required.';
       if (!line.unit.trim()) next[`line-${index}-unit`] = 'Unit is required.';
       if (!/^[A-Za-z]{3}$/.test(line.currency)) next[`line-${index}-currency`] = 'Enter a 3-letter currency code.';
+      if (!line.commodityGroupId) next[`line-${index}-category`] = 'Select or classify a category.';
     });
     if (quotedTotal < 0) next.quotedTotal = 'Quoted total cannot be negative.';
     if (hasTotalMismatch && !discrepancyNote.trim()) {
@@ -531,7 +638,6 @@ export default function NewRequestPage() {
         titleShortDescription: title,
         vendorName,
         vatId,
-        commodityGroupId: commodityGroupId!,
         totalCost: quotedTotal,
         sourceQuoteCurrency: quoteCurrency,
         department,
@@ -544,6 +650,8 @@ export default function NewRequestPage() {
           currency: line.currency,
           catalogArticleId: line.catalogArticleId,
           catalogArticleNumber: line.catalogArticleNumber,
+          commodityGroupId: line.commodityGroupId,
+          classificationSource: line.classificationSource || 'manual',
         })),
         financialBreakdown: { adjustments: serializedAdjustments },
         discrepancyNote: discrepancyNote.trim() || null,
@@ -611,7 +719,7 @@ export default function NewRequestPage() {
           <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-accent-deep/50 transition-colors">
             <input type="file" accept="application/pdf" onChange={handleFileChange} className="hidden" id="pdf-upload" disabled={extracting} />
             <label htmlFor="pdf-upload" className="cursor-pointer">
-              {extracting ? <div className="flex flex-col items-center"><Loader size="lg" /><p className="mt-4 text-sm text-gray-600">Extracting data from PDF...</p></div> : <div><p className="text-sm font-medium text-gray-900">{file ? file.name : 'Click to upload a PDF'}</p><p className="mt-1 text-xs text-gray-500">PDF up to 10MB</p></div>}
+              {extracting ? <div className="flex flex-col items-center"><Loader size="lg" /><p className="mt-4 text-sm text-gray-600">{classifyingCategories ? 'Assigning item categories...' : 'Extracting data from PDF...'}</p></div> : <div><p className="text-sm font-medium text-gray-900">{file ? file.name : 'Click to upload a PDF'}</p><p className="mt-1 text-xs text-gray-500">PDF up to 10MB</p></div>}
             </label>
           </div>
         </div>
@@ -631,18 +739,11 @@ export default function NewRequestPage() {
             <Input label={hasUnmatchedLines ? 'Original Vendor Name *' : 'Original Vendor Name'} value={vendorName} error={formErrors.vendorName} onChange={(event) => { setVendorName(event.target.value); clearFieldError('vendorName'); }} placeholder="Vendor from quote" />
             <Input label={hasUnmatchedLines && requiresVatId ? 'Original Vendor Tax ID *' : 'Original Vendor Tax ID'} value={vatId} error={formErrors.vatId} onChange={(event) => { setVatId(event.target.value); clearFieldError('vatId'); }} placeholder="12-3456789" />
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Commodity Group *</label>
-            <select value={commodityGroupId || ''} onChange={(event) => { setCommodityGroupId(Number(event.target.value) || null); clearFieldError('commodityGroupId'); }} className={`w-full px-3 py-2 border rounded-lg text-gray-900 focus:ring-2 focus:ring-accent-deep/60 ${formErrors.commodityGroupId ? 'border-red-500' : 'border-gray-300'}`}>
-              <option value="">{commodityGroups ? 'Select a commodity group' : 'Loading...'}</option>
-              {commodityGroups?.map((group) => <option key={group.id} value={group.id}>{group.id} - {group.category} - {group.name}</option>)}
-            </select>
-            {formErrors.commodityGroupId && <p className="mt-1.5 text-sm text-red-600">{formErrors.commodityGroupId}</p>}
-          </div>
+          <p className="text-sm text-ink/55">Each item gets its own category. The request’s primary category is based on the highest-value category among its items.</p>
         </div>
 
         <div className="lio-card p-6">
-          <div className="flex items-center justify-between mb-4"><div><h2 className="text-xl font-semibold tracking-tight text-ink">Order Lines *</h2><p className="text-sm text-ink/55 mt-1">Enter item totals before taxes and discounts.</p></div><Button type="button" onClick={addOrderLine} variant="outline" size="sm">+ Add Line</Button></div>
+          <div className="flex items-center justify-between mb-4"><div><h2 className="text-xl font-semibold tracking-tight text-ink">Order Lines *</h2><p className="text-sm text-ink/55 mt-1">Enter item totals and review each item category.</p></div><div className="flex gap-2"><Button type="button" onClick={classifyAllLines} variant="outline" size="sm" disabled={classifyingCategories || !orderLines.length}>{classifyingCategories ? 'Classifying…' : 'Classify items'}</Button><Button type="button" onClick={addOrderLine} variant="outline" size="sm">+ Add Line</Button></div></div>
           {formErrors.orderLines && <Alert variant="error" className="mb-4">{formErrors.orderLines}</Alert>}
           {orderLines.length === 0 ? <div className="text-center py-8 text-gray-500">No order lines yet. Add one to get started.</div> : <div className="space-y-4">
             {orderLines.map((line, index) => (
@@ -656,6 +757,26 @@ export default function NewRequestPage() {
                   <Input label="Currency" value={line.currency} error={formErrors[`line-${index}-currency`]} disabled={!!line.selectedArticle} maxLength={3} onChange={(event) => updateOrderLine(index, 'currency', event.target.value)} placeholder="USD" />
                 </div>
                 <div className="mt-3 flex items-center justify-between"><span className="text-sm text-gray-600">Item total</span><span className="text-lg font-semibold tracking-tight text-ink">{formatMoney(line.totalPrice, line.currency)}</span></div>
+                <div className="mt-3">
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">Item Category *</label>
+                  <select
+                    value={line.commodityGroupId || ''}
+                    onChange={(event) => {
+                      const groupId = Number(event.target.value) || null;
+                      setOrderLines((current) => current.map((currentLine, lineIndex) => lineIndex === index
+                        ? { ...currentLine, commodityGroupId: groupId, classificationSource: 'manual' }
+                        : currentLine));
+                      clearFieldError(`line-${index}-category`);
+                    }}
+                    className={`w-full px-3 py-2 border rounded-lg text-gray-900 ${formErrors[`line-${index}-category`] ? 'border-red-500' : 'border-gray-300'}`}
+                  >
+                    <option value="">{commodityGroups ? 'Select category' : 'Loading categories...'}</option>
+                    {commodityGroups?.map((group) => <option key={group.id} value={group.id}>{group.category} · {group.name}</option>)}
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {formErrors[`line-${index}-category`] || (line.classificationSource === 'llm' ? 'Suggested by AI — review before saving.' : line.commodityGroupId ? 'Selected manually.' : 'Needs review.')}
+                  </p>
+                </div>
                 <CatalogSuggestions
                   description={line.positionDescription}
                   selectedArticle={line.selectedArticle}

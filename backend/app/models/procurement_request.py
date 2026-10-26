@@ -92,6 +92,12 @@ class ProcurementRequest(Base, TimestampMixin):
 
 class OrderLine(Base, CreatedAtMixin):
     __tablename__ = "order_lines"
+    __table_args__ = (
+        CheckConstraint(
+            "classification_source IN ('llm', 'manual', 'legacy')",
+            name="ck_order_line_classification_source",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     request_id: Mapped[uuid.UUID] = mapped_column(
@@ -107,6 +113,12 @@ class OrderLine(Base, CreatedAtMixin):
     # Snapshot the number so request history still identifies the selected item
     # if the catalog entry is later removed.
     catalog_article_number: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commodity_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("commodity_groups.id"), nullable=True, index=True
+    )
+    classification_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="manual", server_default="legacy"
+    )
     unit_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     # NUMERIC(12, 4) since migration 004 — supports decimal quantities (e.g. 1.28 m).
     amount: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
@@ -115,6 +127,7 @@ class OrderLine(Base, CreatedAtMixin):
     line_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     request: Mapped["ProcurementRequest"] = relationship(back_populates="order_lines")
+    commodity_group: Mapped["CommodityGroup | None"] = relationship()
 
 
 class RequestActivity(Base, CreatedAtMixin):

@@ -21,6 +21,10 @@ class OrderLineIn(BaseModel):
     currency: str = Field(default="USD", min_length=3, max_length=3, pattern="^[A-Za-z]{3}$")
     catalog_article_id: uuid.UUID | None = Field(default=None, alias="catalogArticleId")
     catalog_article_number: str | None = Field(default=None, alias="catalogArticleNumber")
+    commodity_group_id: int | None = Field(default=None, alias="commodityGroupId", strict=True)
+    classification_source: Literal["llm", "manual", "legacy"] = Field(
+        default="manual", alias="classificationSource"
+    )
 
     @model_validator(mode="after")
     def normalize_currency(self) -> "OrderLineIn":
@@ -57,7 +61,7 @@ class RequestCreate(BaseModel):
     title: str = Field(min_length=1, alias="titleShortDescription")
     vendor_name: str = Field(default="", alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
-    commodity_group_id: int = Field(alias="commodityGroupId")
+    commodity_group_id: int | None = Field(default=None, alias="commodityGroupId")
     total_cost: float = Field(ge=0, alias="totalCost")
     source_quote_currency: str | None = Field(
         default=None,
@@ -86,7 +90,7 @@ class RequestUpdate(BaseModel):
     title: str = Field(min_length=1)
     vendor_name: str = Field(min_length=1, alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
-    commodity_group_id: int = Field(alias="commodityGroupId")
+    commodity_group_id: int | None = Field(default=None, alias="commodityGroupId")
     total_cost: float = Field(ge=0, alias="totalCost")
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines")
@@ -124,6 +128,9 @@ class OrderLineOut(BaseModel):
     position_description: str
     catalog_article_id: uuid.UUID | None
     catalog_article_number: str | None
+    commodity_group_id: int | None
+    classification_source: str
+    commodity_group: CommodityGroupOut | None = None
     unit_price: float
     amount: float
     unit: str

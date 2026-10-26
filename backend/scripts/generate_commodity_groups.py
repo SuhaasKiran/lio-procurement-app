@@ -17,6 +17,10 @@ import sys
 from pathlib import Path
 
 TARGET_DEFAULT = 2000
+CUSTOM_COMMODITY_GROUPS = [
+    ("Information Technology", "IT Hardware"),
+    ("Office & Administration", "Office Supplies"),
+]
 
 # The original 50 (ids 1-50) — kept verbatim so this file stays consistent with
 # migration 0001.
@@ -239,7 +243,12 @@ def generate(target: int) -> list[tuple[int, str, str]]:
             seen.add(key)
             result.append((category, name))
 
-    return [(i + 1, cat, name) for i, (cat, name) in enumerate(result)]
+    generated = [(i + 1, cat, name) for i, (cat, name) in enumerate(result)]
+    custom_rows = [
+        (len(generated) + index + 1, category, name)
+        for index, (category, name) in enumerate(CUSTOM_COMMODITY_GROUPS)
+    ]
+    return generated + custom_rows
 
 
 def write_module(rows: list[tuple[int, str, str]], out_path: Path) -> None:
@@ -269,6 +278,7 @@ def main() -> None:
     ambiguous = {n: c for n, c in by_name.items() if len(c) > 1}
     assert not ambiguous, f"names spanning multiple categories: {ambiguous}"
     assert rows[:50] == [(i + 1, c, n) for i, (c, n) in enumerate(ORIGINAL_50)]
+    assert [(cat, name) for _, cat, name in rows[-len(CUSTOM_COMMODITY_GROUPS):]] == CUSTOM_COMMODITY_GROUPS
 
     out = Path(__file__).resolve().parent.parent / "app" / "data" / "commodity_groups.py"
     write_module(rows, out)

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import get_current_membership, get_current_user, require_org_admin
 from app.db.session import get_db
 from app.models import (
+    CommodityGroup,
     Organization,
     OrganizationInvite,
     OrganizationMember,
@@ -95,6 +96,19 @@ def update_settings(
     db: Session = Depends(get_db),
 ) -> OrganizationSettings:
     org = db.get(Organization, membership.organization_id)
+    group_ids = {rule.commodity_group_id for rule in payload.commodity_rules}
+    valid_ids = {
+        group_id
+        for group_id in db.scalars(
+            select(CommodityGroup.id).where(CommodityGroup.id.in_(group_ids))
+        )
+    } if group_ids else set()
+    unknown_ids = sorted(group_ids - valid_ids)
+    if unknown_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Commodity rules reference unknown category IDs: {unknown_ids}",
+        )
     org.settings = payload.model_dump()
     db.commit()
     return payload

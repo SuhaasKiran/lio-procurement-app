@@ -41,11 +41,12 @@ export default function RequestDetailPage() {
   const [success, setSuccess] = useState('');
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [lineCategories, setLineCategories] = useState<Record<string, number | null>>({});
 
   // Edit form state
   const [form, setForm] = useState({
     requestorName: '', title: '', vendorName: '', vatId: '', department: '',
-    commodityGroupId: null as number | null, totalCost: 0, discrepancyNote: '',
+    totalCost: 0, discrepancyNote: '',
   });
 
   const load = async () => {
@@ -131,10 +132,12 @@ export default function RequestDetailPage() {
       vendorName: request.vendor_name,
       vatId: request.vat_id || '',
       department: request.department || '',
-      commodityGroupId: request.commodity_group_id,
       totalCost: request.total_cost || 0,
       discrepancyNote: request.discrepancy_note || '',
     });
+    setLineCategories(Object.fromEntries(
+      request.order_lines.map((line) => [line.id, line.commodity_group_id])
+    ));
     setEditing(true);
   };
 
@@ -147,7 +150,6 @@ export default function RequestDetailPage() {
         title: form.title,
         vendorName: form.vendorName,
         vatId: form.vatId,
-        commodityGroupId: form.commodityGroupId || 0,
         totalCost: form.totalCost,
         department: form.department,
         orderLines: (request.order_lines || []).map((l) => ({
@@ -159,6 +161,10 @@ export default function RequestDetailPage() {
           currency: request.currency || 'USD',
           catalogArticleId: l.catalog_article_id,
           catalogArticleNumber: l.catalog_article_number,
+          commodityGroupId: lineCategories[l.id],
+          classificationSource: lineCategories[l.id] === l.commodity_group_id
+            ? l.classification_source
+            : 'manual',
         })),
         // The detail screen does not edit adjustments yet, but saving a title
         // or vendor edit must never discard the extracted reconciliation data.
@@ -294,6 +300,10 @@ export default function RequestDetailPage() {
                       {line.amount} {line.unit} × {formatMoney(line.unit_price, request.currency)}
                       {line.catalog_article_number && <span className="ml-2 text-accent-deep">Catalog {line.catalog_article_number}</span>}
                     </p>
+                    <p className="text-xs text-ink/55 mt-1">
+                      {line.commodity_group ? `${line.commodity_group.category} · ${line.commodity_group.name}` : 'Category needs review'}
+                      {line.classification_source === 'llm' ? ' · AI suggested' : line.classification_source === 'legacy' ? ' · Existing request' : ' · Manually selected'}
+                    </p>
                   </div>
                   <p className="text-sm font-semibold text-ink">{formatMoney(line.total_price, request.currency)}</p>
                 </div>
@@ -367,18 +377,27 @@ export default function RequestDetailPage() {
                 <Input label="Tax ID" value={form.vatId}
                   onChange={(e) => setForm({ ...form, vatId: e.target.value })} />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-ink/70 mb-1.5">Commodity Group *</label>
-                <select
-                  value={form.commodityGroupId || ''}
-                  onChange={(e) => setForm({ ...form, commodityGroupId: Number(e.target.value) })}
-                  className="w-full h-11 px-3.5 border border-line rounded-xl text-sm text-ink bg-white focus:outline-none focus:ring-2 focus:ring-accent-deep/60"
-                >
-                  <option value="">Select a commodity group</option>
-                  {commodityGroups?.map((g) => (
-                    <option key={g.id} value={g.id}>{g.id} - {g.category} - {g.name}</option>
-                  ))}
-                </select>
+              <div className="rounded-xl border border-line p-4">
+                <h3 className="text-sm font-medium text-ink">Item categories</h3>
+                <p className="mb-3 text-xs text-ink/55">The request category is calculated from these line categories.</p>
+                {request.order_lines.map((line) => (
+                  <label key={line.id} className="mb-3 block text-sm text-ink/70">
+                    {line.position_description}
+                    <select
+                      value={lineCategories[line.id] || ''}
+                      onChange={(e) => setLineCategories((current) => ({
+                        ...current,
+                        [line.id]: Number(e.target.value) || null,
+                      }))}
+                      className="mt-1 w-full h-11 px-3.5 border border-line rounded-xl text-sm text-ink bg-white focus:outline-none focus:ring-2 focus:ring-accent-deep/60"
+                    >
+                      <option value="">Select a category</option>
+                      {commodityGroups?.map((g) => (
+                        <option key={g.id} value={g.id}>{g.category} · {g.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
               </div>
               <Input label="Total Cost ($) *" type="number" step="0.01" value={form.totalCost}
                 onChange={(e) => setForm({ ...form, totalCost: parseFloat(e.target.value) || 0 })} />

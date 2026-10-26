@@ -56,7 +56,7 @@ _FIELD_LABELS = {
 
 def _load_request_options():
     return (
-        selectinload(ProcurementRequest.order_lines),
+        selectinload(ProcurementRequest.order_lines).joinedload(OrderLine.commodity_group),
         selectinload(ProcurementRequest.commodity_group),
     )
 
@@ -82,12 +82,42 @@ def _get_org_request(
     return request
 
 
-def _validate_commodity_group(db: Session, commodity_group_id: int) -> None:
-    if db.get(CommodityGroup, commodity_group_id) is None:
+def _validate_line_categories(db: Session, lines: list[OrderLineIn]) -> None:
+    category_ids = {line.commodity_group_id for line in lines}
+    if None in category_ids:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unknown commodity group id: {commodity_group_id}",
+            detail="Assign a commodity category to every order line before saving.",
         )
+    existing = set(
+        db.scalars(
+            select(CommodityGroup.id).where(CommodityGroup.id.in_(category_ids))
+        )
+    ) if category_ids else set()
+    if existing != category_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="One or more order lines have an unknown commodity category.",
+        )
+
+
+def _primary_commodity_group_id(lines: list[OrderLineIn]) -> int:
+    """Choose the highest-value category for legacy request-level reporting."""
+    totals: dict[int, Decimal] = {}
+    first_seen: dict[int, int] = {}
+    for index, line in enumerate(lines):
+        if line.commodity_group_id is None:
+            continue
+        totals[line.commodity_group_id] = totals.get(line.commodity_group_id, Decimal("0")) + Decimal(
+            str(line.total_price)
+        )
+        first_seen.setdefault(line.commodity_group_id, index)
+    if not totals:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Assign a commodity category to every order line before saving.",
+        )
+    return max(totals, key=lambda group_id: (totals[group_id], -first_seen[group_id]))
 
 
 def _enforce_required_fields(
@@ -171,6 +201,8 @@ def _order_lines_signature(lines) -> list[tuple]:
             float(line.total_price),
             getattr(line, "catalog_article_id", None),
             getattr(line, "catalog_article_number", None),
+            getattr(line, "commodity_group_id", None),
+            getattr(line, "classification_source", None),
         )
         for line in lines
     ]
@@ -189,7 +221,7 @@ def _changed_fields(request: ProcurementRequest, payload: RequestUpdate) -> list
         changed.append("currency")
     if (request.vat_id or "") != (payload.vat_id or ""):
         changed.append("vat_id")
-    if request.commodity_group_id != payload.commodity_group_id:
+    if request.commodity_group_id != _primary_commodity_group_id(payload.order_lines):
         changed.append("commodity_group_id")
     if float(request.total_cost or 0) != float(payload.total_cost or 0):
         changed.append("total_cost")
@@ -243,6 +275,8 @@ def _make_request_lines(lines: list[OrderLineIn]) -> list[OrderLine]:
             position_description=line.position_description,
             catalog_article_id=line.catalog_article_id,
             catalog_article_number=line.catalog_article_number,
+            commodity_group_id=line.commodity_group_id,
+            classification_source=line.classification_source,
             unit_price=line.unit_price,
             amount=line.amount,
             unit=line.unit,
@@ -260,7 +294,7 @@ def create_request_batch(
     db: Session = Depends(get_db),
 ) -> list[RequestOut]:
     """Create one request per selected supplier, in a single transaction."""
-    _validate_commodity_group(db, payload.commodity_group_id)
+    _validate_line_categories(db, payload.order_lines)
     if any(line.catalog_article_id is None for line in payload.order_lines) and not payload.vendor_name.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -330,6 +364,8 @@ def create_request_batch(
                 currency=currency,
                 catalogArticleId=article.id,
                 catalogArticleNumber=article.article_number,
+                commodityGroupId=line.commodity_group_id,
+                classificationSource=line.classification_source,
             )
             supplier_id = article.supplier_id
             vendor_name = supplier_name
@@ -469,7 +505,7 @@ def create_request_batch(
             supplier_id=group["supplier_id"],
             currency=group["currency"],
             vat_id=group["vat_id"],
-            commodity_group_id=payload.commodity_group_id,
+            commodity_group_id=_primary_commodity_group_id(group["lines"]),
             total_cost=group_payload.total_cost,
             financial_breakdown=financial_breakdown,
             discrepancy_note=discrepancy_note,
@@ -536,7 +572,7 @@ def create_request(
             detail="Create catalog-based requests through the supplier-splitting endpoint.",
         )
     currency = _single_request_currency(payload.order_lines)
-    _validate_commodity_group(db, payload.commodity_group_id)
+    _validate_line_categories(db, payload.order_lines)
     _enforce_required_fields(db, membership.organization_id, payload)
     financial_breakdown, discrepancy_note = _validate_request_financials(payload)
 
@@ -549,7 +585,7 @@ def create_request(
         vendor_name=payload.vendor_name,
         currency=currency,
         vat_id=payload.vat_id,
-        commodity_group_id=payload.commodity_group_id,
+        commodity_group_id=_primary_commodity_group_id(payload.order_lines),
         total_cost=payload.total_cost,
         financial_breakdown=financial_breakdown,
         discrepancy_note=discrepancy_note,
@@ -577,7 +613,7 @@ def update_request(
 ) -> RequestOut:
     request = _get_org_request(db, request_id, membership.organization_id)
     currency = _single_request_currency(payload.order_lines)
-    _validate_commodity_group(db, payload.commodity_group_id)
+    _validate_line_categories(db, payload.order_lines)
     _enforce_required_fields(db, membership.organization_id, payload)
     financial_breakdown, discrepancy_note = _validate_request_financials(payload)
 
@@ -639,7 +675,7 @@ def update_request(
     request.supplier_id = next(iter(linked_supplier_ids), request.supplier_id)
     request.currency = currency
     request.vat_id = payload.vat_id
-    request.commodity_group_id = payload.commodity_group_id
+    request.commodity_group_id = _primary_commodity_group_id(payload.order_lines)
     request.total_cost = payload.total_cost
     request.department = payload.department
     request.financial_breakdown = financial_breakdown

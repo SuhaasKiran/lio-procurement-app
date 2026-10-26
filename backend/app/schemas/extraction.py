@@ -15,7 +15,35 @@ class PdfParseResponse(BaseModel):
 
 
 class ExtractionRequest(BaseModel):
-    text: str
+    text: str = Field(max_length=200_000)
+
+
+class CategoryLineIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    position_description: str = Field(min_length=1, max_length=1000, alias="positionDescription")
+    total_price: float = Field(ge=0, alias="totalPrice")
+    currency: str = Field(default="USD", min_length=3, max_length=3, pattern="^[A-Za-z]{3}$")
+
+    @model_validator(mode="after")
+    def normalize_currency(self) -> "CategoryLineIn":
+        self.currency = self.currency.upper()
+        return self
+
+
+class CategoryAssignmentRequest(BaseModel):
+    lines: list[CategoryLineIn] = Field(min_length=1, max_length=50)
+
+
+class CategoryAssignmentOut(BaseModel):
+    index: int
+    commodity_group_id: int | None = Field(alias="commodityGroupId")
+    status: Literal["assigned", "needs_review"]
+    error: str | None = None
+
+
+class CategoryAssignmentResponse(BaseModel):
+    lines: list[CategoryAssignmentOut]
 
 
 # camelCase on the wire — matches the AI's JSON output format and what the
@@ -108,8 +136,6 @@ class ExtractedVendorData(BaseModel):
     order_lines: list[OrderLineData] = Field(default_factory=list, alias="orderLines")
     total_cost: float = Field(default=0, alias="totalCost")
     adjustments: list[AdjustmentData] = Field(default_factory=list)
-    commodity_group_id: int | None = Field(default=None, alias="commodityGroupId")
-    commodity_group_name: str | None = Field(default=None, alias="commodityGroupName")
 
     @model_validator(mode="before")
     @classmethod
@@ -142,20 +168,6 @@ class ExtractedVendorData(BaseModel):
         cleaned[lines_key] = [
             line for line in cleaned[lines_key] if isinstance(line, dict)
         ]
-
-        group_id_key = (
-            "commodityGroupId" if "commodityGroupId" in cleaned else "commodity_group_id"
-        )
-        group_id = cleaned.get(group_id_key)
-        if group_id is None or (isinstance(group_id, str) and not group_id.strip()):
-            cleaned[group_id_key] = None
-        name_key = (
-            "commodityGroupName"
-            if "commodityGroupName" in cleaned
-            else "commodity_group_name"
-        )
-        if cleaned.get(name_key) is None:
-            cleaned[name_key] = None
 
         # Tax/discount rows are optional enrichment. One malformed row should
         # not invalidate otherwise useful vendor and item extraction.

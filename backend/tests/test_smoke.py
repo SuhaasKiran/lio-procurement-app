@@ -154,6 +154,8 @@ def test_full_user_journey():
         "orderLines": [
             {
                 "positionDescription": "Creative Cloud",
+                "commodityGroupId": 31,
+                "classificationSource": "manual",
                 "unitPrice": 150.0,
                 "amount": 10,
                 "unit": "licenses",
@@ -172,6 +174,7 @@ def test_full_user_journey():
 
     # unknown commodity group -> 422
     bad = dict(payload, commodityGroupId=999999)
+    bad["orderLines"] = [dict(payload["orderLines"][0], commodityGroupId=999999)]
     assert client.post("/requests", json=bad, headers=_auth(owner_token)).status_code == 422
 
     # --- list requests ---
@@ -228,6 +231,8 @@ def test_full_user_journey():
         "orderLines": [
             {
                 "positionDescription": "Desk",
+                "commodityGroupId": 15,
+                "classificationSource": "manual",
                 "unitPrice": 250.0,
                 "amount": 2,
                 "unit": "pieces",
@@ -235,6 +240,8 @@ def test_full_user_journey():
             },
             {
                 "positionDescription": "Chair",
+                "commodityGroupId": 15,
+                "classificationSource": "manual",
                 "unitPrice": 0.0,
                 "amount": 1.28,
                 "unit": "meters",
@@ -421,7 +428,7 @@ def test_activity_log_and_document():
         "vendorName": "FurnitureCo", "vatId": "12-0000001", "commodityGroupId": 15,
         "totalCost": 500.0, "department": "Ops",
         "orderLines": [
-            {"positionDescription": "Chair", "unitPrice": 250, "amount": 2, "unit": "pc", "totalPrice": 500}
+            {"positionDescription": "Chair", "commodityGroupId": 15, "classificationSource": "manual", "unitPrice": 250, "amount": 2, "unit": "pc", "totalPrice": 500}
         ],
     }
     rid = client.post("/requests", json=payload, headers=_auth(admin)).json()["id"]
@@ -431,7 +438,7 @@ def test_activity_log_and_document():
     updated["title"] = "Office Chairs"
     updated["totalCost"] = 600.0
     updated["orderLines"] = [
-        {"positionDescription": "Chair", "unitPrice": 300, "amount": 2, "unit": "pc", "totalPrice": 600}
+        {"positionDescription": "Chair", "commodityGroupId": 15, "classificationSource": "manual", "unitPrice": 300, "amount": 2, "unit": "pc", "totalPrice": 600}
     ]
     # RequestUpdate uses "title" (not titleShortDescription)
     updated = {
@@ -515,6 +522,8 @@ def test_request_total_mismatch_requires_discrepancy_note():
         "orderLines": [
             {
                 "positionDescription": "Widget",
+                "commodityGroupId": 15,
+                "classificationSource": "manual",
                 "unitPrice": 100.0,
                 "amount": 1,
                 "unit": "piece",
@@ -704,7 +713,7 @@ def test_approval_flow_with_roles():
         "totalCost": 4200.0,
         "department": "Engineering",
         "orderLines": [
-            {"positionDescription": "Laptop", "unitPrice": 1400, "amount": 3, "unit": "pc", "totalPrice": 4200}
+            {"positionDescription": "Laptop", "commodityGroupId": 31, "classificationSource": "manual", "unitPrice": 1400, "amount": 3, "unit": "pc", "totalPrice": 4200}
         ],
     }
     r = client.post("/requests", json=payload, headers=_auth(requester))
@@ -782,13 +791,13 @@ def test_org_settings_required_fields():
     # Default settings: nothing extra required.
     r = client.get("/organizations/me/settings", headers=_auth(token))
     assert r.status_code == 200
-    assert r.json() == {"required_fields": []}
+    assert r.json() == {"required_fields": [], "commodity_rules": []}
 
     base_payload = {
         "requestorName": "S", "titleShortDescription": "T", "vendorName": "V",
         "vatId": "", "commodityGroupId": 31, "totalCost": 10.0, "department": "",
         "orderLines": [
-            {"positionDescription": "x", "unitPrice": 10, "amount": 1, "unit": "pc", "totalPrice": 10}
+            {"positionDescription": "x", "commodityGroupId": 31, "classificationSource": "manual", "unitPrice": 10, "amount": 1, "unit": "pc", "totalPrice": 10}
         ],
     }
     # Without a requirement, a request with blank vat_id/department is accepted.

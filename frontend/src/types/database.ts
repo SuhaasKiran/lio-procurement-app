@@ -75,6 +75,9 @@ export type OrderLine = {
   position_description: string;
   catalog_article_id: string | null;
   catalog_article_number: string | null;
+  commodity_group_id: number | null;
+  classification_source: 'llm' | 'manual' | 'legacy';
+  commodity_group: Pick<CommodityGroup, 'id' | 'category' | 'name'> | null;
   unit_price: number;
   amount: number;
   unit: string;
