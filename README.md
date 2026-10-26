@@ -7,6 +7,11 @@ requests across your organization.
 - **`backend/`** — FastAPI, SQLAlchemy, Alembic, JWT auth
 - **Database** — PostgreSQL 16
 
+## Reports
+
+- [Business report](reports/fix_business_report.md) — summary of the fixes and their impact for stakeholders.
+- [Technical report](reports/fix_technical_report.md) — implementation details, workflows, decisions, and known limitations for engineers.
+
 ## Prerequisites
 
 - **Docker Desktop** (or Docker Engine) with **Docker Compose v2** — running before you start.
