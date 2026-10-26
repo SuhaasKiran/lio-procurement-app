@@ -22,6 +22,14 @@ const APPROVAL_BADGE: Record<string, string> = {
 const titleCase = (s: string) =>
   s.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
 
+const formatMoney = (value: number | null, currency = 'USD') => {
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value || 0);
+  } catch {
+    return `${currency} ${(value || 0).toFixed(2)}`;
+  }
+};
+
 export default function RequestsPage() {
   const [requests, setRequests] = useState<ProcurementRequestWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
@@ -176,7 +184,7 @@ export default function RequestsPage() {
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-ink">
-                      ${(request.total_cost || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      {formatMoney(request.total_cost, request.currency)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
                       <Link

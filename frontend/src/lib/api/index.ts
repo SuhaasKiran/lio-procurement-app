@@ -60,6 +60,9 @@ export interface OrderLineInput {
   amount: number;
   unit: string;
   totalPrice: number;
+  currency: string;
+  catalogArticleId?: string | null;
+  catalogArticleNumber?: string | null;
 }
 
 export interface AdjustmentInput {
@@ -81,6 +84,7 @@ export interface CreateRequestInput {
   vatId: string;
   commodityGroupId: number;
   totalCost: number;
+  sourceQuoteCurrency?: string;
   department: string;
   orderLines: OrderLineInput[];
   financialBreakdown: FinancialBreakdownInput;
@@ -151,6 +155,12 @@ export interface ArticlePage {
   offset: number;
 }
 
+export interface ArticleMatch extends Article {
+  match_type: 'article_number' | 'exact_description' | 'keywords';
+  score: number;
+  matched_terms: string[];
+}
+
 // ============================================================================
 // Auth
 // ============================================================================
@@ -219,6 +229,10 @@ export const requests = {
 
   create(input: CreateRequestInput): Promise<ProcurementRequestWithDetails> {
     return apiFetch('/requests', { body: input });
+  },
+
+  createBatch(input: CreateRequestInput): Promise<ProcurementRequestWithDetails[]> {
+    return apiFetch('/requests/batch', { body: input });
   },
 
   update(requestId: string, input: UpdateRequestInput): Promise<ProcurementRequestWithDetails> {
@@ -331,6 +345,12 @@ export const articles = {
 
   count(): Promise<{ count: number }> {
     return apiFetch('/articles/count');
+  },
+
+  suggest(params: { search: string; limit?: number }): Promise<ArticleMatch[]> {
+    const qs = new URLSearchParams({ search: params.search });
+    qs.set('limit', String(params.limit ?? 8));
+    return apiFetch(`/articles/suggestions?${qs.toString()}`);
   },
 };
 

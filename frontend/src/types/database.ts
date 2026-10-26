@@ -53,6 +53,8 @@ export type ProcurementRequest = {
   requestor_name: string;
   title: string;
   vendor_name: string;
+  supplier_id: string | null;
+  currency: string;
   vat_id: string | null;
   commodity_group_id: number | null;
   department: string | null;
@@ -71,6 +73,8 @@ export type OrderLine = {
   id: string;
   request_id: string;
   position_description: string;
+  catalog_article_id: string | null;
+  catalog_article_number: string | null;
   unit_price: number;
   amount: number;
   unit: string;

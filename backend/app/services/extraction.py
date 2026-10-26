@@ -42,6 +42,7 @@ Please extract the following information:
    - Amount (Qty/Quantity/Count)
    - Unit (Unit/UoM - e.g., "licenses", "pieces", "ea.", "items")
    - Total Price: the exact final total printed for that selected item. Do not calculate it from unit price and quantity.
+   - Currency: the three-letter ISO code (for example, USD, EUR, GBP); infer it from the printed symbol or code, and use USD only when the document gives no currency clue
 6. Adjustments. Extract taxes, discounts, and additional charges separately with a positive amount:
    - kind: "tax", "discount", or "charge" (use "charge" for shipping, delivery, freight, handling, or similar costs)
    - description: the label in the quote
@@ -57,6 +58,7 @@ IMPORTANT INSTRUCTIONS:
 - For the title, create a SHORT (2-5 words) description based on the main items being purchased
 - Extract only the purchased products/services as order lines. NEVER extract alternatives, options, substitutes, shipping, delivery, freight, handling, or lines marked "Alternative", "Optional", "Alt.", or similar as order lines.
 - For unit prices and totals, extract only the numeric value (remove currency symbols)
+- Return currency as a three-letter ISO code. If different items use different currencies, preserve the currency for each line.
 - For the unit field, write out abbreviations in plain English (e.g., "ea." -> "pieces", "lic." -> "licenses")
 - Be careful with US number formatting (e.g., "1,438.00" = 1438.00)
 - Copy printed amounts; never calculate taxes, discounts, charges, or line totals. Item-specific taxes/discounts are reference information only. The quote-level total check uses only sum(orderLines.totalPrice) + quote-level taxes/charges - quote-level discounts.
@@ -79,6 +81,7 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
       "unitPrice": 150.00,
       "amount": 10,
       "unit": "licenses",
+      "currency": "USD",
       "totalPrice": 1500.00
     }}
   ],

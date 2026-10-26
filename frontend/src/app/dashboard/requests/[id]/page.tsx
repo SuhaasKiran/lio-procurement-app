@@ -19,8 +19,13 @@ const APPROVAL_BADGE: Record<string, string> = {
   pending: 'bg-amber-100 text-amber-800',
 };
 const titleCase = (s: string) => s.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
-const usd = (n: number | null) =>
-  `$${(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+const formatMoney = (value: number | null, currency = 'USD') => {
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value || 0);
+  } catch {
+    return `${currency} ${(value || 0).toFixed(2)}`;
+  }
+};
 
 export default function RequestDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -151,6 +156,9 @@ export default function RequestDetailPage() {
           amount: l.amount,
           unit: l.unit,
           totalPrice: l.total_price,
+          currency: request.currency || 'USD',
+          catalogArticleId: l.catalog_article_id,
+          catalogArticleNumber: l.catalog_article_number,
         })),
         // The detail screen does not edit adjustments yet, but saving a title
         // or vendor edit must never discard the extracted reconciliation data.
@@ -264,7 +272,7 @@ export default function RequestDetailPage() {
                   ? `${request.commodity_groups.category} · ${request.commodity_groups.name}`
                   : '—'}
               />
-              <Field label="Total Cost" value={usd(request.total_cost)} />
+              <Field label="Total Cost" value={formatMoney(request.total_cost, request.currency)} />
             </dl>
           </div>
 
@@ -283,10 +291,11 @@ export default function RequestDetailPage() {
                   <div>
                     <p className="text-sm font-medium text-ink">{i + 1}. {line.position_description}</p>
                     <p className="text-sm text-ink/55 mt-0.5">
-                      {line.amount} {line.unit} × {usd(line.unit_price)}
+                      {line.amount} {line.unit} × {formatMoney(line.unit_price, request.currency)}
+                      {line.catalog_article_number && <span className="ml-2 text-accent-deep">Catalog {line.catalog_article_number}</span>}
                     </p>
                   </div>
-                  <p className="text-sm font-semibold text-ink">{usd(line.total_price)}</p>
+                  <p className="text-sm font-semibold text-ink">{formatMoney(line.total_price, request.currency)}</p>
                 </div>
               ))}
             </div>
@@ -352,7 +361,8 @@ export default function RequestDetailPage() {
               <Input label="Title *" value={form.title}
                 onChange={(e) => setForm({ ...form, title: e.target.value })} />
               <div className="grid grid-cols-2 gap-4">
-                <Input label="Vendor Name *" value={form.vendorName}
+                <Input label="Vendor Name *" value={form.vendorName} disabled={!!request.supplier_id}
+                  helperText={request.supplier_id ? 'This supplier comes from the selected catalog item.' : undefined}
                   onChange={(e) => setForm({ ...form, vendorName: e.target.value })} />
                 <Input label="Tax ID" value={form.vatId}
                   onChange={(e) => setForm({ ...form, vatId: e.target.value })} />

@@ -40,6 +40,12 @@ class ProcurementRequest(Base, TimestampMixin):
     requestor_name: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     vendor_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # The selected supplier is retained when a catalog item drives this request.
+    # Free-text suppliers remain supported and leave this unset.
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("suppliers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     vat_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     commodity_group_id: Mapped[int | None] = mapped_column(
         ForeignKey("commodity_groups.id"), nullable=True, index=True
@@ -81,6 +87,7 @@ class ProcurementRequest(Base, TimestampMixin):
         order_by="OrderLine.line_order",
     )
     commodity_group: Mapped["CommodityGroup | None"] = relationship()
+    supplier: Mapped["Supplier | None"] = relationship()
 
 
 class OrderLine(Base, CreatedAtMixin):
@@ -94,6 +101,12 @@ class OrderLine(Base, CreatedAtMixin):
     )
 
     position_description: Mapped[str] = mapped_column(Text, nullable=False)
+    catalog_article_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Snapshot the number so request history still identifies the selected item
+    # if the catalog entry is later removed.
+    catalog_article_number: Mapped[str | None] = mapped_column(Text, nullable=True)
     unit_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     # NUMERIC(12, 4) since migration 004 — supports decimal quantities (e.g. 1.28 m).
     amount: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
@@ -146,3 +159,4 @@ class RequestDocument(Base, CreatedAtMixin):
 
 # Imported for the type-only forward reference in relationships above.
 from app.models.commodity_group import CommodityGroup  # noqa: E402,F401
+from app.models.supplier import Supplier  # noqa: E402,F401

@@ -28,6 +28,12 @@ class OrderLineData(BaseModel):
     amount: float = 0
     unit: str = ""
     total_price: float = Field(default=0, alias="totalPrice")
+    currency: str = Field(default="USD", min_length=3, max_length=3, pattern="^[A-Za-z]{3}$")
+
+    @model_validator(mode="after")
+    def normalize_currency(self) -> "OrderLineData":
+        self.currency = self.currency.upper()
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -54,6 +60,8 @@ class OrderLineData(BaseModel):
         ):
             key = field if field in cleaned else snake
             cleaned[key] = _empty_numeric(cleaned.get(key))
+        if not cleaned.get("currency"):
+            cleaned["currency"] = "USD"
         return cleaned
 
 

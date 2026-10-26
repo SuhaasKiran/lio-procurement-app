@@ -506,7 +506,9 @@ def test_request_total_mismatch_requires_discrepancy_note():
         "requestorName": "Alex Admin",
         "titleShortDescription": "Test quote",
         "vendorName": "Vendor Co",
-        "vatId": "",
+        # The seeded Acme organization requires a VAT ID; keep this populated so
+        # the test reaches the financial mismatch validation it is exercising.
+        "vatId": "12-3456789",
         "commodityGroupId": 15,
         "totalCost": 115.0,
         "department": "Operations",

@@ -1,13 +1,15 @@
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.deps import get_current_membership, require_buyer_or_admin
 from app.db.session import get_db
 from app.models import (
+    Article,
     CommodityGroup,
     OrderLine,
     Organization,
@@ -23,6 +25,8 @@ from app.services.reconciliation import (
 )
 from app.schemas.requests import (
     ApprovalDecision,
+    FinancialBreakdownIn,
+    OrderLineIn,
     RequestActivityOut,
     RequestCreate,
     RequestOut,
@@ -39,6 +43,7 @@ _FIELD_LABELS = {
     "requestor_name": "requestor",
     "title": "title",
     "vendor_name": "vendor",
+    "currency": "currency",
     "vat_id": "tax ID",
     "commodity_group_id": "commodity group",
     "total_cost": "total cost",
@@ -164,6 +169,8 @@ def _order_lines_signature(lines) -> list[tuple]:
             float(line.amount),
             line.unit,
             float(line.total_price),
+            getattr(line, "catalog_article_id", None),
+            getattr(line, "catalog_article_number", None),
         )
         for line in lines
     ]
@@ -178,6 +185,8 @@ def _changed_fields(request: ProcurementRequest, payload: RequestUpdate) -> list
         changed.append("title")
     if request.vendor_name != payload.vendor_name:
         changed.append("vendor_name")
+    if payload.order_lines and request.currency != payload.order_lines[0].currency:
+        changed.append("currency")
     if (request.vat_id or "") != (payload.vat_id or ""):
         changed.append("vat_id")
     if request.commodity_group_id != payload.commodity_group_id:
@@ -214,6 +223,291 @@ def list_requests(
     return [RequestOut.model_validate(r) for r in requests]
 
 
+def _normalized_supplier_name(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _single_request_currency(lines: list[OrderLineIn]) -> str:
+    currencies = {line.currency for line in lines}
+    if len(currencies) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A request can contain items in only one currency. Split the items by currency.",
+        )
+    return next(iter(currencies), "USD")
+
+
+def _make_request_lines(lines: list[OrderLineIn]) -> list[OrderLine]:
+    return [
+        OrderLine(
+            position_description=line.position_description,
+            catalog_article_id=line.catalog_article_id,
+            catalog_article_number=line.catalog_article_number,
+            unit_price=line.unit_price,
+            amount=line.amount,
+            unit=line.unit,
+            total_price=line.total_price,
+            line_order=index + 1,
+        )
+        for index, line in enumerate(lines)
+    ]
+
+
+@router.post("/batch", response_model=list[RequestOut], status_code=status.HTTP_201_CREATED)
+def create_request_batch(
+    payload: RequestCreate,
+    membership: OrganizationMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+) -> list[RequestOut]:
+    """Create one request per selected supplier, in a single transaction."""
+    _validate_commodity_group(db, payload.commodity_group_id)
+    if any(line.catalog_article_id is None for line in payload.order_lines) and not payload.vendor_name.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Vendor name is required for items that remain from the original quote.",
+        )
+
+    selected_ids = {
+        line.catalog_article_id
+        for line in payload.order_lines
+        if line.catalog_article_id is not None
+    }
+    articles = list(
+        db.scalars(
+            select(Article)
+            .where(
+                Article.id.in_(selected_ids),
+                Article.organization_id == membership.organization_id,
+            )
+            .options(joinedload(Article.supplier))
+        )
+    ) if selected_ids else []
+    articles_by_id = {article.id: article for article in articles}
+    if len(articles_by_id) != len(selected_ids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A selected catalog item is unavailable in your organization. Refresh the suggestions and try again.",
+        )
+
+    selected_supplier_ids_by_name: dict[str, set[uuid.UUID]] = {}
+    for article in articles:
+        if article.supplier:
+            name_key = _normalized_supplier_name(article.supplier.name)
+            selected_supplier_ids_by_name.setdefault(name_key, set()).add(article.supplier_id)
+
+    groups: dict[tuple[str, str, str], dict] = {}
+    line_group_keys: dict[int, tuple[str, str, str]] = {}
+    any_catalog_selection = bool(selected_ids)
+    original_name_key = _normalized_supplier_name(payload.vendor_name)
+
+    for index, line in enumerate(payload.order_lines):
+        article = articles_by_id.get(line.catalog_article_id) if line.catalog_article_id else None
+        if article is not None:
+            supplier_name = article.supplier.name if article.supplier else ""
+            if not supplier_name:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="The selected catalog item has no active supplier.",
+                )
+            if (
+                money(line.unit_price) != money(article.unit_price)
+                or line.currency != article.currency.upper()
+                or line.unit != article.unit
+                or line.position_description != article.description
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This catalog item changed after it was selected. Search again and review the latest price before creating the request.",
+                )
+            currency = article.currency.upper()
+            key = ("supplier", str(article.supplier_id), currency)
+            line_data = OrderLineIn(
+                positionDescription=article.description,
+                unitPrice=float(article.unit_price),
+                amount=line.amount,
+                unit=article.unit,
+                totalPrice=float(money(Decimal(str(article.unit_price)) * Decimal(str(line.amount)))),
+                currency=currency,
+                catalogArticleId=article.id,
+                catalogArticleNumber=article.article_number,
+            )
+            supplier_id = article.supplier_id
+            vendor_name = supplier_name
+            vat_id = article.supplier.vat_id if article.supplier else None
+        else:
+            currency = line.currency
+            original_key = _normalized_supplier_name(payload.vendor_name)
+            matching_supplier_ids = selected_supplier_ids_by_name.get(original_key, set())
+            if len(matching_supplier_ids) == 1:
+                supplier_id = next(iter(matching_supplier_ids))
+                key = ("supplier", str(supplier_id), currency)
+                supplier_name = next(
+                    article.supplier.name
+                    for article in articles
+                    if article.supplier_id == supplier_id and article.supplier
+                )
+                vendor_name = supplier_name
+                selected_supplier = next(
+                    article.supplier
+                    for article in articles
+                    if article.supplier_id == supplier_id and article.supplier
+                )
+                vat_id = selected_supplier.vat_id
+            else:
+                key = ("original", original_key, currency)
+                supplier_id = None
+                vendor_name = payload.vendor_name.strip()
+                vat_id = payload.vat_id
+            line_data = line.model_copy(
+                update={"catalog_article_id": None, "catalog_article_number": None}
+            )
+
+        group = groups.setdefault(
+            key,
+            {
+                "supplier_id": supplier_id,
+                "vendor_name": vendor_name,
+                "vat_id": vat_id,
+                "currency": currency,
+                "lines": [],
+                "source_indexes": [],
+                "adjustments": [],
+            },
+        )
+        group["lines"].append(line_data)
+        group["source_indexes"].append(index)
+        line_group_keys[index] = key
+
+    # Item-specific adjustments follow their item. Quote-level adjustments stay
+    # with the original supplier, if that supplier appears in exactly one group.
+    order_adjustments = [
+        adjustment
+        for adjustment in payload.financial_breakdown.adjustments
+        if adjustment.scope == "order"
+    ]
+    for adjustment in payload.financial_breakdown.adjustments:
+        if adjustment.scope != "line":
+            continue
+        source_index = adjustment.line_index
+        if source_index is None or source_index not in line_group_keys:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="A line adjustment refers to an item that is no longer in the request.",
+            )
+        group = groups[line_group_keys[source_index]]
+        group_index = group["source_indexes"].index(source_index)
+        group["adjustments"].append(
+            adjustment.model_copy(update={"line_index": group_index})
+        )
+
+    if order_adjustments:
+        original_supplier_groups = [
+            (key, group)
+            for key, group in groups.items()
+            if _normalized_supplier_name(group["vendor_name"]) == original_name_key
+        ]
+        if len(original_supplier_groups) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Quote-level taxes, discounts, or charges must stay with the original supplier. "
+                    "Keep an item with that supplier, in one currency, or remove the quote-level adjustments."
+                ),
+            )
+        source_currency = payload.source_quote_currency or (
+            payload.order_lines[0].currency if payload.order_lines else "USD"
+        )
+        if original_supplier_groups[0][1]["currency"] != source_currency:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "The quote-level adjustments use a different currency from the original-supplier request. "
+                    "Correct the currencies or remove those adjustments before creating the requests."
+                ),
+            )
+        original_supplier_groups[0][1]["adjustments"].extend(order_adjustments)
+
+    if not groups:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Add at least one order line before creating a request.",
+        )
+
+    # Preserve the existing quote reconciliation behavior for an unchanged,
+    # single-supplier request. Changed/split requests use their own line totals.
+    preserve_quote_total = len(groups) == 1 and not any_catalog_selection
+    requests_to_create: list[ProcurementRequest] = []
+    for group in groups.values():
+        group_payload = payload.model_copy(
+            update={
+                "vendor_name": group["vendor_name"],
+                "vat_id": group["vat_id"],
+                "order_lines": group["lines"],
+                "financial_breakdown": FinancialBreakdownIn(
+                    adjustments=group["adjustments"]
+                ),
+                "total_cost": payload.total_cost if preserve_quote_total else float(
+                    calculate_total(group["lines"], group["adjustments"])
+                ),
+            }
+        )
+        _enforce_required_fields(db, membership.organization_id, group_payload)
+        financial_breakdown, discrepancy_note = _validate_request_financials(group_payload)
+        if not preserve_quote_total:
+            financial_breakdown["sourceQuotedTotal"] = float(payload.total_cost)
+            financial_breakdown["sourceQuotedCurrency"] = (
+                payload.source_quote_currency
+                or (payload.order_lines[0].currency if payload.order_lines else "USD")
+            )
+            financial_breakdown["splitSupplierCount"] = len(groups)
+
+        request = ProcurementRequest(
+            user_id=membership.user_id,
+            requestor_name=payload.requestor_name,
+            title=payload.title,
+            vendor_name=group["vendor_name"],
+            supplier_id=group["supplier_id"],
+            currency=group["currency"],
+            vat_id=group["vat_id"],
+            commodity_group_id=payload.commodity_group_id,
+            total_cost=group_payload.total_cost,
+            financial_breakdown=financial_breakdown,
+            discrepancy_note=discrepancy_note,
+            department=payload.department,
+            organization_id=membership.organization_id,
+            created_by=membership.user_id,
+            status="open",
+        )
+        request.order_lines = _make_request_lines(group["lines"])
+        requests_to_create.append(request)
+
+    try:
+        db.add_all(requests_to_create)
+        db.flush()
+        for request in requests_to_create:
+            _log_activity(
+                db,
+                request.id,
+                membership.user_id,
+                "created",
+                "Request created" if len(requests_to_create) == 1 else "Request created from supplier split",
+                {"supplier_split_count": len(requests_to_create)}
+                if len(requests_to_create) > 1
+                else None,
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return [
+        RequestOut.model_validate(
+            _get_org_request(db, request.id, membership.organization_id)
+        )
+        for request in requests_to_create
+    ]
+
+
 @router.get("/{request_id}", response_model=RequestOut)
 def get_request(
     request_id: uuid.UUID,
@@ -231,6 +525,17 @@ def create_request(
     membership: OrganizationMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ) -> RequestOut:
+    if not payload.vendor_name.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Vendor name is required.",
+        )
+    if any(line.catalog_article_id for line in payload.order_lines):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Create catalog-based requests through the supplier-splitting endpoint.",
+        )
+    currency = _single_request_currency(payload.order_lines)
     _validate_commodity_group(db, payload.commodity_group_id)
     _enforce_required_fields(db, membership.organization_id, payload)
     financial_breakdown, discrepancy_note = _validate_request_financials(payload)
@@ -242,6 +547,7 @@ def create_request(
         requestor_name=payload.requestor_name,
         title=payload.title,
         vendor_name=payload.vendor_name,
+        currency=currency,
         vat_id=payload.vat_id,
         commodity_group_id=payload.commodity_group_id,
         total_cost=payload.total_cost,
@@ -252,17 +558,7 @@ def create_request(
         created_by=membership.user_id,
         status="open",
     )
-    request.order_lines = [
-        OrderLine(
-            position_description=line.position_description,
-            unit_price=line.unit_price,
-            amount=line.amount,
-            unit=line.unit,
-            total_price=line.total_price,
-            line_order=index + 1,
-        )
-        for index, line in enumerate(payload.order_lines)
-    ]
+    request.order_lines = _make_request_lines(payload.order_lines)
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
@@ -280,15 +576,68 @@ def update_request(
     db: Session = Depends(get_db),
 ) -> RequestOut:
     request = _get_org_request(db, request_id, membership.organization_id)
+    currency = _single_request_currency(payload.order_lines)
     _validate_commodity_group(db, payload.commodity_group_id)
     _enforce_required_fields(db, membership.organization_id, payload)
     financial_breakdown, discrepancy_note = _validate_request_financials(payload)
 
     changed = _changed_fields(request, payload)
 
+    requested_catalog_ids = {
+        line.catalog_article_id
+        for line in payload.order_lines
+        if line.catalog_article_id is not None
+    }
+    catalog_articles = list(
+        db.scalars(
+            select(Article)
+            .where(
+                Article.id.in_(requested_catalog_ids),
+                Article.organization_id == membership.organization_id,
+            )
+            .options(joinedload(Article.supplier))
+        )
+    ) if requested_catalog_ids else []
+    articles_by_id = {article.id: article for article in catalog_articles}
+    if len(articles_by_id) != len(requested_catalog_ids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A linked catalog item is unavailable in your organization.",
+        )
+    linked_supplier_ids = {article.supplier_id for article in catalog_articles}
+    if len(linked_supplier_ids) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A request can contain catalog items from only one supplier.",
+        )
+    if request.supplier_id and linked_supplier_ids and linked_supplier_ids != {request.supplier_id}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A catalog-linked request cannot be changed to a different supplier.",
+        )
+    if request.supplier_id and payload.vendor_name.strip() != request.vendor_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A catalog-linked request must keep its selected supplier.",
+        )
+
+    if catalog_articles:
+        selected_supplier = catalog_articles[0].supplier
+        if (
+            selected_supplier is None
+            or _normalized_supplier_name(payload.vendor_name)
+            != _normalized_supplier_name(selected_supplier.name)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The vendor name must match the selected catalog supplier.",
+            )
+
     request.requestor_name = payload.requestor_name
     request.title = payload.title
     request.vendor_name = payload.vendor_name
+    request.supplier_id = next(iter(linked_supplier_ids), request.supplier_id)
+    request.currency = currency
     request.vat_id = payload.vat_id
     request.commodity_group_id = payload.commodity_group_id
     request.total_cost = payload.total_cost
@@ -297,17 +646,7 @@ def update_request(
     request.discrepancy_note = discrepancy_note
 
     # Replace order lines (same semantics as the original delete-and-insert).
-    request.order_lines = [
-        OrderLine(
-            position_description=line.position_description,
-            unit_price=line.unit_price,
-            amount=line.amount,
-            unit=line.unit,
-            total_price=line.total_price,
-            line_order=index + 1,
-        )
-        for index, line in enumerate(payload.order_lines)
-    ]
+    request.order_lines = _make_request_lines(payload.order_lines)
 
     if changed:
         labels = [_FIELD_LABELS.get(f, f) for f in changed]

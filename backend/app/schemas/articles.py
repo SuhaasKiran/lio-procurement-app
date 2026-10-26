@@ -27,3 +27,11 @@ class ArticlePage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ArticleMatchOut(ArticleOut):
+    """A catalog result with a plain-language reason for its ranking."""
+
+    match_type: str
+    score: float
+    matched_terms: list[str]

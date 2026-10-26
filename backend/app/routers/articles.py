@@ -5,9 +5,39 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.deps import get_current_membership
 from app.db.session import get_db
 from app.models import Article, OrganizationMember
-from app.schemas.articles import ArticleOut, ArticlePage
+from app.schemas.articles import ArticleMatchOut, ArticleOut, ArticlePage
+from app.services.article_matching import suggest_articles
 
 router = APIRouter(prefix="/articles", tags=["articles"])
+
+
+@router.get("/suggestions", response_model=list[ArticleMatchOut])
+def article_suggestions(
+    search: str = Query(min_length=2, max_length=200),
+    limit: int = Query(default=8, ge=1, le=20),
+    membership: OrganizationMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+) -> list[ArticleMatchOut]:
+    """Suggest catalog items using exact ids, exact text, then keywords."""
+    matches = suggest_articles(db, membership, search, limit)
+    return [
+        ArticleMatchOut(
+            id=article.id,
+            article_number=article.article_number,
+            supplier_id=article.supplier_id,
+            supplier_name=article.supplier.name if article.supplier else None,
+            description=article.description,
+            unit_price=article.unit_price,
+            currency=article.currency,
+            unit=article.unit,
+            quantity=article.quantity,
+            created_at=article.created_at,
+            match_type=match_type,
+            score=score,
+            matched_terms=matched_terms,
+        )
+        for article, match_type, score, matched_terms in matches
+    ]
 
 
 @router.get("", response_model=ArticlePage)

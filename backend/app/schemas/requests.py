@@ -18,6 +18,14 @@ class OrderLineIn(BaseModel):
     amount: float = Field(ge=0)
     unit: str = Field(min_length=1)
     total_price: float = Field(ge=0, alias="totalPrice")
+    currency: str = Field(default="USD", min_length=3, max_length=3, pattern="^[A-Za-z]{3}$")
+    catalog_article_id: uuid.UUID | None = Field(default=None, alias="catalogArticleId")
+    catalog_article_number: str | None = Field(default=None, alias="catalogArticleNumber")
+
+    @model_validator(mode="after")
+    def normalize_currency(self) -> "OrderLineIn":
+        self.currency = self.currency.upper()
+        return self
 
 
 class AdjustmentIn(BaseModel):
@@ -47,16 +55,30 @@ class FinancialBreakdownIn(BaseModel):
 class RequestCreate(BaseModel):
     requestor_name: str = Field(min_length=1, alias="requestorName")
     title: str = Field(min_length=1, alias="titleShortDescription")
-    vendor_name: str = Field(min_length=1, alias="vendorName")
+    vendor_name: str = Field(default="", alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
     total_cost: float = Field(ge=0, alias="totalCost")
+    source_quote_currency: str | None = Field(
+        default=None,
+        alias="sourceQuoteCurrency",
+        min_length=3,
+        max_length=3,
+        pattern="^[A-Za-z]{3}$",
+    )
+
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines", min_length=1)
     financial_breakdown: FinancialBreakdownIn = Field(
         default_factory=FinancialBreakdownIn, alias="financialBreakdown"
     )
     discrepancy_note: str | None = Field(default=None, alias="discrepancyNote")
+
+    @model_validator(mode="after")
+    def normalize_source_quote_currency(self) -> "RequestCreate":
+        if self.source_quote_currency:
+            self.source_quote_currency = self.source_quote_currency.upper()
+        return self
 
 
 class RequestUpdate(BaseModel):
@@ -100,6 +122,8 @@ class OrderLineOut(BaseModel):
     id: uuid.UUID
     request_id: uuid.UUID
     position_description: str
+    catalog_article_id: uuid.UUID | None
+    catalog_article_number: str | None
     unit_price: float
     amount: float
     unit: str
@@ -130,6 +154,8 @@ class RequestOut(BaseModel):
     requestor_name: str
     title: str
     vendor_name: str
+    supplier_id: uuid.UUID | None
+    currency: str
     vat_id: str | None
     commodity_group_id: int | None
     department: str | None
