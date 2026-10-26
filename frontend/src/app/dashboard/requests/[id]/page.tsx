@@ -15,10 +15,12 @@ const STATUS_BADGE: Record<string, string> = {
 };
 const APPROVAL_BADGE: Record<string, string> = {
   approved: 'bg-green-100 text-green-800',
+  not_required: 'bg-green-100 text-green-800',
   rejected: 'bg-red-100 text-red-700',
   pending: 'bg-amber-100 text-amber-800',
 };
 const titleCase = (s: string) => s.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
+const approvalLabel = (s: string) => s === 'not_required' ? 'Approval not required' : titleCase(s);
 const formatMoney = (value: number | null, currency = 'USD') => {
   try {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(value || 0);
@@ -206,6 +208,7 @@ export default function RequestDetailPage() {
   }
 
   const canApprove = (role === 'buyer' || role === 'admin') && request.approval_status === 'pending';
+  const canRejectApproved = role === 'admin' && request.approval_status === 'approved';
 
   return (
     <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -222,7 +225,7 @@ export default function RequestDetailPage() {
               {titleCase(request.status)}
             </span>
             <span className={`inline-flex px-2.5 py-1 text-xs font-semibold rounded-full ${APPROVAL_BADGE[request.approval_status]}`}>
-              {titleCase(request.approval_status)}
+              {approvalLabel(request.approval_status)}
             </span>
           </div>
         </div>
@@ -233,6 +236,19 @@ export default function RequestDetailPage() {
               <Button size="sm" variant="outline" className="text-red-600 border-red-300 hover:bg-red-50"
                 onClick={() => decide('rejected')} disabled={busy}>Reject</Button>
             </>
+          )}
+          {canRejectApproved && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-red-600 border-red-300 hover:bg-red-50"
+              onClick={() => {
+                if (confirm('Reject this already approved request?')) void decide('rejected');
+              }}
+              disabled={busy}
+            >
+              Reject after approval
+            </Button>
           )}
           <Button size="sm" variant="outline" onClick={openEdit} disabled={busy}>Edit</Button>
           <Button size="sm" variant="outline" className="text-red-600 border-red-300 hover:bg-red-50"
@@ -267,6 +283,9 @@ export default function RequestDetailPage() {
         <div className="space-y-6">
           <div className="lio-card p-6">
             <h2 className="text-lg font-semibold tracking-tight text-ink mb-4">Details</h2>
+            {request.approval_note && (
+              <p className="mb-4 rounded-lg bg-ink-800/[0.03] p-3 text-sm text-ink/70">{request.approval_note}</p>
+            )}
             <dl className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm">
               <Field label="Requestor" value={request.requestor_name} />
               <Field label="Department" value={request.department || '—'} />

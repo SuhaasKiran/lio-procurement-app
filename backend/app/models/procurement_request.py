@@ -26,7 +26,7 @@ class ProcurementRequest(Base, TimestampMixin):
             name="ck_procurement_request_status",
         ),
         CheckConstraint(
-            "approval_status IN ('pending', 'approved', 'rejected')",
+            "approval_status IN ('pending', 'approved', 'rejected', 'not_required')",
             name="ck_procurement_request_approval_status",
         ),
     )
@@ -65,6 +65,7 @@ class ProcurementRequest(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    approval_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Financial
     total_cost: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)

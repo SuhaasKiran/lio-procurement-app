@@ -15,12 +15,14 @@ const STATUS_BADGE: Record<string, string> = {
 
 const APPROVAL_BADGE: Record<string, string> = {
   approved: 'bg-green-100 text-green-800',
+  not_required: 'bg-green-100 text-green-800',
   rejected: 'bg-red-100 text-red-700',
   pending: 'bg-amber-100 text-amber-800',
 };
 
 const titleCase = (s: string) =>
   s.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
+const approvalLabel = (s: string) => s === 'not_required' ? 'Approval not required' : titleCase(s);
 
 const formatMoney = (value: number | null, currency = 'USD') => {
   try {
@@ -180,7 +182,7 @@ export default function RequestsPage() {
                           APPROVAL_BADGE[request.approval_status]
                         }`}
                       >
-                        {titleCase(request.approval_status)}
+                        {approvalLabel(request.approval_status)}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-ink">

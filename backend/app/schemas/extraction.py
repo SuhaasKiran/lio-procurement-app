@@ -132,6 +132,7 @@ class ExtractedVendorData(BaseModel):
     title: str = ""
     vendor_name: str = Field(default="", alias="vendorName")
     vat_id: str = Field(default="", alias="vatId")
+    requestor_name: str = Field(default="", alias="requestorName")
     department: str = ""
     order_lines: list[OrderLineData] = Field(default_factory=list, alias="orderLines")
     total_cost: float = Field(default=0, alias="totalCost")
@@ -148,6 +149,7 @@ class ExtractedVendorData(BaseModel):
             ("title", "title"),
             ("vendorName", "vendor_name"),
             ("vatId", "vat_id"),
+            ("requestorName", "requestor_name"),
             ("department", "department"),
         ):
             key = alias if alias in cleaned else name

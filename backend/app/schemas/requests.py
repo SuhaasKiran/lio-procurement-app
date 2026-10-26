@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 RequestStatus = Literal["open", "in_progress", "closed"]
-ApprovalStatus = Literal["pending", "approved", "rejected"]
+ApprovalStatus = Literal["pending", "approved", "rejected", "not_required"]
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +171,7 @@ class RequestOut(BaseModel):
     approval_status: ApprovalStatus
     approved_by: uuid.UUID | None
     approved_at: datetime | None
+    approval_note: str | None
     total_cost: float | None
     financial_breakdown: dict | None
     discrepancy_note: str | None

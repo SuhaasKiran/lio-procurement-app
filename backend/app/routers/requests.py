@@ -37,6 +37,7 @@ from app.schemas.requests import (
 router = APIRouter(prefix="/requests", tags=["requests"])
 
 MAX_PDF_BYTES = 10 * 1024 * 1024
+APPROVAL_THRESHOLD = Decimal("2000.00")
 
 # Human-readable labels for the fields we track in the activity log.
 _FIELD_LABELS = {
@@ -181,7 +182,7 @@ def _validate_request_financials(
 def _log_activity(
     db: Session,
     request_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
     action: str,
     summary: str,
     detail: dict | None = None,
@@ -194,6 +195,99 @@ def _log_activity(
             summary=summary,
             detail=detail,
         )
+    )
+
+
+def _approval_decision(
+    total_cost: float | Decimal, currency: str
+) -> tuple[str, str | None]:
+    """Return the threshold-based approval state and its provenance note."""
+    amount = money(total_cost)
+    normalized_currency = currency.upper()
+    if normalized_currency == "USD" and amount < APPROVAL_THRESHOLD:
+        return (
+            "not_required",
+            "Automatically approved without buyer review: "
+            f"USD ${amount:,.2f} is below the $2,000.00 threshold.",
+        )
+    if normalized_currency != "USD":
+        return (
+            "pending",
+            f"Buyer approval required: {normalized_currency} {amount:,.2f} "
+            "cannot be compared to the USD $2,000.00 threshold.",
+        )
+    return "pending", None
+
+
+def _set_creation_approval(request: ProcurementRequest, db: Session) -> None:
+    approval_status, approval_note = _approval_decision(
+        request.total_cost or 0, request.currency
+    )
+    request.approval_status = approval_status
+    request.approval_note = approval_note
+    if approval_status == "not_required":
+        _log_activity(
+            db,
+            request.id,
+            None,
+            "auto_approved",
+            approval_note or "Automatically approved below the $2,000 threshold.",
+            {
+                "amount": float(money(request.total_cost or 0)),
+                "currency": request.currency,
+                "threshold": float(APPROVAL_THRESHOLD),
+            },
+        )
+    elif request.currency.upper() != "USD":
+        _log_activity(
+            db,
+            request.id,
+            None,
+            "approval_required",
+            approval_note or "Buyer approval required because the currency cannot be compared to the USD threshold.",
+            {
+                "amount": float(money(request.total_cost or 0)),
+                "currency": request.currency,
+                "threshold": float(APPROVAL_THRESHOLD),
+            },
+        )
+
+
+def _reevaluate_approval(
+    request: ProcurementRequest, db: Session, changed: list[str]
+) -> None:
+    """Recheck approval only after a financial edit; append the decision to the audit log."""
+    financial_fields = {"total_cost", "order_lines", "financial_breakdown", "currency"}
+    if not financial_fields.intersection(changed):
+        return
+
+    old_status = request.approval_status
+    new_status, new_note = _approval_decision(request.total_cost or 0, request.currency)
+    request.approval_status = new_status
+    request.approval_note = new_note
+    request.approved_by = None
+    request.approved_at = None
+
+    amount = money(request.total_cost or 0)
+    if new_status == "not_required":
+        action = "auto_approved"
+        summary = new_note or "Automatically approved without buyer review below the $2,000 threshold."
+    else:
+        action = "approval_required"
+        summary = new_note or f"Buyer approval required after financial edit: {request.currency} {amount:,.2f}."
+    _log_activity(
+        db,
+        request.id,
+        None,
+        action,
+        summary,
+        {
+            "previous_status": old_status,
+            "approval_status": new_status,
+            "amount": float(amount),
+            "currency": request.currency,
+            "threshold": float(APPROVAL_THRESHOLD),
+        },
     )
 
 
@@ -539,6 +633,7 @@ def create_request_batch(
                 if len(requests_to_create) > 1
                 else None,
             )
+            _set_creation_approval(request, db)
         db.commit()
     except Exception:
         db.rollback()
@@ -612,6 +707,7 @@ def create_request(
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
+    _set_creation_approval(request, db)
     db.commit()
 
     request = _get_org_request(db, request.id, membership.organization_id)
@@ -698,6 +794,8 @@ def update_request(
     # Replace order lines (same semantics as the original delete-and-insert).
     request.order_lines = _make_request_lines(payload.order_lines)
 
+    _reevaluate_approval(request, db, changed)
+
     if changed:
         labels = [_FIELD_LABELS.get(f, f) for f in changed]
         _log_activity(
@@ -749,21 +847,33 @@ def decide_approval(
     """Approve or reject a pending request (buyers and admins only)."""
     request = _get_org_request(db, request_id, membership.organization_id)
 
-    if request.approval_status != "pending":
+    rejected_after_approval = (
+        request.approval_status == "approved" and payload.decision == "rejected"
+    )
+    if rejected_after_approval and membership.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can reject a request after it has been approved.",
+        )
+    if request.approval_status != "pending" and not rejected_after_approval:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Request has already been {request.approval_status}.",
         )
 
-    request.approval_status = payload.decision
-    request.approved_by = membership.user_id
-    request.approved_at = datetime.now(timezone.utc)
+    previous_status = request.approval_status
+    request.approval_status = "rejected" if rejected_after_approval else payload.decision
+    if not rejected_after_approval:
+        request.approved_by = membership.user_id
+        request.approved_at = datetime.now(timezone.utc)
+        request.approval_note = None
     _log_activity(
         db,
         request.id,
         membership.user_id,
         payload.decision,
-        f"Request {payload.decision}",
+        "Request rejected after approval" if rejected_after_approval else f"Request {payload.decision}",
+        {"previous_status": previous_status} if rejected_after_approval else None,
     )
     db.commit()
 

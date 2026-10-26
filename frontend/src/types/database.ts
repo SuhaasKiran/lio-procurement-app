@@ -59,9 +59,10 @@ export type ProcurementRequest = {
   commodity_group_id: number | null;
   department: string | null;
   status: 'open' | 'in_progress' | 'closed';
-  approval_status: 'pending' | 'approved' | 'rejected';
+  approval_status: 'pending' | 'approved' | 'rejected' | 'not_required';
   approved_by: string | null;
   approved_at: string | null;
+  approval_note: string | null;
   total_cost: number | null;
   financial_breakdown: Record<string, unknown> | null;
   discrepancy_note: string | null;

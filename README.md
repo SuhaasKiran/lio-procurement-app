@@ -33,7 +33,7 @@ Development happens in the **Acme Corp** organization, which has one of each rol
 | `buyer@acme.com` | buyer | approve requests |
 | `requester@acme.com` | requester | create & track requests |
 
-Every request needs approval by a buyer or admin (see the **Approvals** tab).
+Requests of $2,000 or more need approval by a buyer or admin (see the **Approvals** tab). Requests below $2,000 USD are marked as not requiring approval. Requests in other currencies stay pending because the app does not convert currencies.
 
 Other tenants exist to show the multi-tenant setup — **Walmart, Schaeffler,
 Siemens, BMW** — each with an admin at `admin@<company>.com` (same password).

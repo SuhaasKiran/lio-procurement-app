@@ -497,6 +497,7 @@ export default function NewRequestPage() {
       setTitle(extracted.title || '');
       setVendorName(extracted.vendorName || '');
       setVatId(extracted.vatId || '');
+      if (extracted.requestorName?.trim()) setRequestorName(extracted.requestorName);
       setDepartment(extracted.department || '');
       const extractedLines: OrderLine[] = (extracted.orderLines || []).map((line) => ({
         localId: newLineId(),

@@ -43,22 +43,25 @@ Please extract the following information:
 1. Title/Short Description (A brief summary of what this procurement is for - e.g., "Office Equipment Purchase", "Software Licenses", etc.)
 2. Vendor Name (Vendor/Supplier/Seller/Company name)
 3. Tax ID (Employer Identification Number/EIN/Federal Tax ID/TIN/VAT ID)
-4. Department/Customer (Department/Customer/Bill To/Customer name)
-5. Order Lines/Items (All line items with):
+4. Requestor Name (the individual employee/contact requesting or receiving the purchase, when named)
+5. Department/Customer (the purchaser's department, organization, or customer name when shown)
+6. Order Lines/Items (All line items with):
    - Position Description (Description/Product/Item/Article)
    - Unit Price (Unit Price/Price/Rate/Price per unit)
    - Amount (Qty/Quantity/Count)
    - Unit (Unit/UoM - e.g., "licenses", "pieces", "ea.", "items")
    - Total Price: the exact final total printed for that selected item. Do not calculate it from unit price and quantity.
    - Currency: the three-letter ISO code (for example, USD, EUR, GBP); infer it from the printed symbol or code, and use USD only when the document gives no currency clue
-6. Adjustments. Extract taxes, discounts, and additional charges separately with a positive amount:
+7. Adjustments. Extract taxes, discounts, and additional charges separately with a positive amount:
    - kind: "tax", "discount", or "charge" (use "charge" for shipping, delivery, freight, handling, or similar costs)
    - description: the label in the quote
    - scope: "line" for an individual item or "order" for the complete quote
    - lineIndex: zero-based integer index of the matching order line for line adjustments; JSON null for order-level adjustments
-7. Total Cost (the stated Grand Total/Total Cost/Total Offer Cost after all adjustments)
+8. Total Cost (the stated Grand Total/Total Cost/Total Offer Cost after all adjustments)
 IMPORTANT INSTRUCTIONS:
 - For the title, create a SHORT (2-5 words) description based on the main items being purchased
+- Keep the requestor's personal name separate from the department or organization. If a recipient/contact is shown as a person followed by an organization, such as "Lukas Heinzmann, Lio Technologies, Inc.", return "Lukas Heinzmann" as requestorName and "Lio Technologies, Inc." as department. Never put both values in department. If either value is not clearly present, leave that field empty rather than guessing.
+- Do not mistake the seller/vendor for the requestor's organization; use the organization shown with the purchaser/contact, when present.
 - Extract only the purchased products/services as order lines. NEVER extract alternatives, options, substitutes, shipping, delivery, freight, handling, or lines marked "Alternative", "Optional", "Alt.", or similar as order lines.
 - For unit prices and totals, extract only the numeric value (remove currency symbols)
 - Return currency as a three-letter ISO code. If different items use different currencies, preserve the currency for each line.
@@ -72,6 +75,7 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
   "title": "Short description of procurement",
   "vendorName": "Company Name",
   "vatId": "12-3456789",
+  "requestorName": "Requestor Name",
   "department": "Department Name",
   "orderLines": [
     {{

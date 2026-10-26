@@ -118,6 +118,7 @@ export interface ExtractedVendorData {
   title: string;
   vendorName: string;
   vatId: string;
+  requestorName: string;
   department: string;
   orderLines: OrderLineInput[];
   totalCost: number;
@@ -219,7 +220,7 @@ export interface RequestActivity {
   id: string;
   request_id: string;
   actor_id: string | null;
-  action: 'created' | 'updated' | 'status_changed' | 'approved' | 'rejected' | 'document_attached';
+  action: 'created' | 'updated' | 'status_changed' | 'approved' | 'rejected' | 'auto_approved' | 'approval_required' | 'document_attached';
   summary: string;
   detail: Record<string, unknown> | null;
   created_at: string;

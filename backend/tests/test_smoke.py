@@ -200,8 +200,8 @@ def test_full_user_journey():
             ).all()
             return [a.action for a in rows]
 
-    # created + status_changed so far
-    assert _activity_actions() == ["created", "status_changed"]
+    # created + automatic threshold decision + status change so far
+    assert _activity_actions() == ["created", "auto_approved", "status_changed"]
 
     # same-status update does NOT add activity
     client.patch(
@@ -209,7 +209,7 @@ def test_full_user_journey():
         json={"status": "in_progress"},
         headers=_auth(owner_token),
     )
-    assert _activity_actions() == ["created", "status_changed"]
+    assert _activity_actions() == ["created", "auto_approved", "status_changed"]
 
     # invalid status -> 422
     r = client.patch(
@@ -426,9 +426,9 @@ def test_activity_log_and_document():
     payload = {
         "requestorName": "Alex Admin", "titleShortDescription": "Chairs",
         "vendorName": "FurnitureCo", "vatId": "12-0000001", "commodityGroupId": 15,
-        "totalCost": 500.0, "department": "Ops",
+        "totalCost": 2500.0, "department": "Ops",
         "orderLines": [
-            {"positionDescription": "Chair", "commodityGroupId": 15, "classificationSource": "manual", "unitPrice": 250, "amount": 2, "unit": "pc", "totalPrice": 500}
+            {"positionDescription": "Chair", "commodityGroupId": 15, "classificationSource": "manual", "unitPrice": 1250, "amount": 2, "unit": "pc", "totalPrice": 2500}
         ],
     }
     rid = client.post("/requests", json=payload, headers=_auth(admin)).json()["id"]
@@ -436,21 +436,22 @@ def test_activity_log_and_document():
     # edit two fields -> one 'updated' activity naming those fields
     updated = dict(payload)
     updated["title"] = "Office Chairs"
-    updated["totalCost"] = 600.0
+    updated["totalCost"] = 2600.0
     updated["orderLines"] = [
-        {"positionDescription": "Chair", "commodityGroupId": 15, "classificationSource": "manual", "unitPrice": 300, "amount": 2, "unit": "pc", "totalPrice": 600}
+        {"positionDescription": "Chair", "commodityGroupId": 15, "classificationSource": "manual", "unitPrice": 1300, "amount": 2, "unit": "pc", "totalPrice": 2600}
     ]
     # RequestUpdate uses "title" (not titleShortDescription)
     updated = {
         "requestorName": "Alex Admin", "title": "Office Chairs", "vendorName": "FurnitureCo",
-        "vatId": "12-0000001", "commodityGroupId": 15, "totalCost": 600.0, "department": "Ops",
+        "vatId": "12-0000001", "commodityGroupId": 15, "totalCost": 2600.0, "department": "Ops",
         "orderLines": updated["orderLines"],
     }
     r = client.put(f"/requests/{rid}", json=updated, headers=_auth(admin))
     assert r.status_code == 200, r.text
 
     # approve, then a status change
-    client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(admin))
+    decision = client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(admin))
+    assert decision.status_code == 200, decision.text
     client.patch(f"/requests/{rid}/status", json={"status": "closed"}, headers=_auth(admin))
 
     # attach a PDF
@@ -470,7 +471,7 @@ def test_activity_log_and_document():
     assert r.status_code == 200
     actions = [a["action"] for a in r.json()]
     assert set(actions) == {
-        "created", "updated", "approved", "status_changed", "document_attached"
+        "created", "updated", "approval_required", "approved", "status_changed", "document_attached"
     }
     updated_entry = next(a for a in r.json() if a["action"] == "updated")
     assert set(updated_entry["detail"]["changed_fields"]) == {
@@ -518,6 +519,7 @@ def test_request_total_mismatch_requires_discrepancy_note():
         "vatId": "12-3456789",
         "commodityGroupId": 15,
         "totalCost": 115.0,
+        "hasExtractedQuote": True,
         "department": "Operations",
         "orderLines": [
             {
@@ -774,6 +776,125 @@ def test_approval_flow_with_roles():
     # cleanup: remove the demo-org requests this test created
     for rid in (request_id, second_id):
         client.delete(f"/requests/{rid}", headers=_auth(admin))
+
+
+def test_approval_threshold_on_create_and_financial_edits():
+    requester = _signin("requester@acme.com")
+    buyer = _signin("buyer@acme.com")
+    admin = _signin("admin@acme.com")
+    created_ids = []
+
+    def payload(amount: float, *, currency: str = "USD", adjustment: float = 0) -> dict:
+        item_total = amount - adjustment
+        return {
+            "requestorName": "Threshold Test",
+            "titleShortDescription": "Threshold test purchase",
+            "vendorName": "Threshold Vendor",
+            "vatId": "12-3456789",
+            "commodityGroupId": 31,
+            "totalCost": amount,
+            "orderLines": [
+                {
+                    "positionDescription": "Test item",
+                    "commodityGroupId": 31,
+                    "unitPrice": item_total,
+                    "amount": 1,
+                    "unit": "each",
+                    "totalPrice": item_total,
+                    "currency": currency,
+                }
+            ],
+            "financialBreakdown": {
+                "adjustments": ([{"kind": "charge", "description": "Delivery", "amount": adjustment}] if adjustment else [])
+            },
+        }
+
+    try:
+        # The total includes delivery; $1,999.99 is below the cutoff.
+        r = client.post(
+            "/requests", json=payload(1999.99, adjustment=50), headers=_auth(requester)
+        )
+        assert r.status_code == 201, r.text
+        low = r.json()
+        created_ids.append(low["id"])
+        assert low["total_cost"] == 1999.99
+        assert low["approval_status"] == "not_required"
+        assert "Automatically approved" in low["approval_note"]
+        activity = client.get(f"/requests/{low['id']}/activity", headers=_auth(requester)).json()
+        automatic = next(a for a in activity if a["action"] == "auto_approved")
+        assert automatic["actor_id"] is None
+        assert automatic["detail"] == {
+            "amount": 1999.99,
+            "currency": "USD",
+            "threshold": 2000.0,
+        }
+
+        # Exactly $2,000 still needs a buyer, including tax/delivery in total.
+        r = client.post(
+            "/requests", json=payload(2000.00, adjustment=10), headers=_auth(requester)
+        )
+        assert r.status_code == 201, r.text
+        request_id = r.json()["id"]
+        created_ids.append(request_id)
+        assert r.json()["approval_status"] == "pending"
+        assert r.json()["approval_note"] is None
+
+        # No exchange-rate conversion exists, so foreign-currency amounts stay pending.
+        r = client.post(
+            "/requests", json=payload(1800.00, currency="EUR"), headers=_auth(requester)
+        )
+        assert r.status_code == 201, r.text
+        foreign_id = r.json()["id"]
+        created_ids.append(foreign_id)
+        assert r.json()["approval_status"] == "pending"
+        assert "cannot be compared" in r.json()["approval_note"]
+
+        # A financial edit crossing the threshold reopens approval.
+        edit = payload(2000.00, adjustment=10)
+        edit["title"] = edit.pop("titleShortDescription")
+        r = client.put(f"/requests/{low['id']}", json=edit, headers=_auth(requester))
+        assert r.status_code == 200, r.text
+        assert r.json()["approval_status"] == "pending"
+        assert r.json()["approved_by"] is None
+        assert "approval_required" in [
+            a["action"]
+            for a in client.get(f"/requests/{low['id']}/activity", headers=_auth(requester)).json()
+        ]
+
+        # A buyer approval is retained for harmless edits, but a later financial
+        # change above the threshold needs a fresh decision.
+        r = client.patch(
+            f"/requests/{low['id']}/approval",
+            json={"decision": "approved"},
+            headers=_auth(buyer),
+        )
+        assert r.status_code == 200
+        approved_payload = payload(2000.00, adjustment=10)
+        approved_payload["title"] = "Renamed only"
+        r = client.put(f"/requests/{low['id']}", json=approved_payload, headers=_auth(requester))
+        assert r.status_code == 200
+        assert r.json()["approval_status"] == "approved"
+        assert r.json()["approved_by"] is not None
+
+        edited = payload(2100.00, adjustment=10)
+        edited["title"] = "Renamed only"
+        r = client.put(f"/requests/{low['id']}", json=edited, headers=_auth(requester))
+        assert r.status_code == 200
+        assert r.json()["approval_status"] == "pending"
+        assert r.json()["approved_by"] is None
+        assert r.json()["approved_at"] is None
+
+        # Moving back below the limit removes the buyer task and records why.
+        lower = payload(1999.99, adjustment=50)
+        lower["title"] = "Renamed only"
+        r = client.put(f"/requests/{low['id']}", json=lower, headers=_auth(requester))
+        assert r.status_code == 200
+        assert r.json()["approval_status"] == "not_required"
+        assert "$1,999.99" in r.json()["approval_note"]
+        assert r.json()["approved_by"] is None
+    finally:
+        for request_id in created_ids:
+            client.delete(f"/requests/{request_id}", headers=_auth(admin))
 
 
 def test_org_settings_required_fields():
