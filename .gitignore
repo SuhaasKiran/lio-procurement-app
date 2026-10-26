@@ -1,0 +1,8 @@
+# Local environment files and secrets
+.env
+.env.*
+
+# Local OS / Python artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
