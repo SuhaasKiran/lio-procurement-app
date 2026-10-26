@@ -6,3 +6,8 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+
+# Frontend dependencies and generated Next.js output
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts

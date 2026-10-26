@@ -1,9 +1,16 @@
 """Focused tests for quote extraction's deterministic safeguards."""
 from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
 
 from app.schemas.extraction import ExtractedVendorData
 from app.services.extraction import _exclude_alternative_lines, _move_additional_charge_lines
-from app.services.reconciliation import calculate_total
+from app.services.reconciliation import (
+    calculate_total,
+    money,
+    validate_adjustment_line_indexes,
+)
 
 
 def test_partial_extraction_normalizes_null_text_fields() -> None:
@@ -164,3 +171,80 @@ def test_explicit_alternative_lines_and_their_adjustments_are_excluded() -> None
     assert [line.position_description for line in extracted.order_lines] == ["Selected panel", "Installation"]
     assert len(extracted.adjustments) == 1
     assert extracted.adjustments[0].line_index == 1
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(1.005, Decimal("1.01")), (1.004, Decimal("1.00")), (-1.005, Decimal("-1.01"))],
+)
+def test_money_rounds_half_up_to_cents(value, expected) -> None:
+    assert money(value) == expected
+
+
+def test_total_supports_empty_lines_and_order_discount_and_zero_amounts() -> None:
+    assert calculate_total([], []) == Decimal("0.00")
+    lines = [
+        ExtractedVendorData.model_validate(
+            {"orderLines": [{"positionDescription": "Free sample", "totalPrice": 0}]}
+        ).order_lines[0]
+    ]
+    adjustments = ExtractedVendorData.model_validate(
+        {
+            "orderLines": [{"positionDescription": "Free sample", "totalPrice": 0}],
+            "adjustments": [
+                {"kind": "charge", "amount": 10, "scope": "order"},
+                {"kind": "discount", "amount": 10, "scope": "order"},
+                {"kind": "tax", "amount": 0, "scope": "order"},
+            ],
+        }
+    ).adjustments
+    assert calculate_total(lines, adjustments) == Decimal("0.00")
+
+
+@pytest.mark.parametrize("line_index", [None, -1, 1])
+def test_invalid_line_adjustment_indexes_are_rejected(line_index) -> None:
+    adjustment = [
+        SimpleNamespace(scope="line", line_index=line_index)
+    ]
+    with pytest.raises(ValueError, match="invalid order line"):
+        validate_adjustment_line_indexes(adjustment, 1)
+
+
+def test_alternative_prefixes_are_case_insensitive_and_adjustment_indexes_remap() -> None:
+    extracted = ExtractedVendorData.model_validate(
+        {
+            "orderLines": [
+                {"positionDescription": "Main item", "totalPrice": 10},
+                {"positionDescription": "  OPTIONAL extra", "totalPrice": 5},
+                {"positionDescription": "Alt. replacement", "totalPrice": 20},
+                {"positionDescription": "Alternative item", "totalPrice": 30},
+            ],
+            "adjustments": [
+                {"kind": "tax", "amount": 1, "scope": "line", "lineIndex": 3},
+                {"kind": "tax", "amount": 1, "scope": "order"},
+            ],
+        }
+    )
+    _exclude_alternative_lines(extracted)
+    assert [line.position_description for line in extracted.order_lines] == ["Main item"]
+    assert len(extracted.adjustments) == 1
+    assert extracted.adjustments[0].scope == "order"
+
+
+def test_freight_is_moved_once_and_other_line_adjustments_keep_remapped_index() -> None:
+    extracted = ExtractedVendorData.model_validate(
+        {
+            "orderLines": [
+                {"positionDescription": "Shipping", "totalPrice": 12},
+                {"positionDescription": "Item", "totalPrice": 100},
+            ],
+            "adjustments": [
+                {"kind": "charge", "description": " shipping ", "amount": 12, "scope": "order"},
+                {"kind": "discount", "amount": 5, "scope": "line", "lineIndex": 1},
+            ],
+        }
+    )
+    _move_additional_charge_lines(extracted)
+    assert [line.position_description for line in extracted.order_lines] == ["Item"]
+    assert len([a for a in extracted.adjustments if a.kind == "charge"]) == 1
+    assert extracted.adjustments[-1].line_index == 0

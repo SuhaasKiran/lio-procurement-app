@@ -35,3 +35,12 @@ class ArticleMatchOut(ArticleOut):
     match_type: str
     score: float
     matched_terms: list[str]
+
+
+class ArticleMatchPage(BaseModel):
+    """A page of catalog matches, including the total for navigation."""
+
+    items: list[ArticleMatchOut]
+    total: int
+    limit: int
+    offset: int

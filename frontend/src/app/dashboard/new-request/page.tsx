@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation } from '@tanstack/react-query';
 import * as api from '@/lib/api';
@@ -45,10 +45,16 @@ interface RequestGroupPreview {
   supplierName: string;
   currency: string;
   count: number;
+  subtotal: number;
   total: number;
 }
 
-function buildRequestGroups(lines: OrderLine[], originalSupplier: string): RequestGroupPreview[] {
+function buildRequestGroups(
+  lines: OrderLine[],
+  originalSupplier: string,
+  adjustments: Adjustment[],
+  quoteCurrency: string
+): RequestGroupPreview[] {
   const supplierIdsByName = new Map<string, Set<string>>();
   for (const line of lines) {
     if (!line.selectedArticle?.supplier_name) continue;
@@ -70,12 +76,54 @@ function buildRequestGroups(lines: OrderLine[], originalSupplier: string): Reque
         : `original:${normalizedName(originalSupplier)}:${line.currency}`;
     const supplierName = article?.supplier_name || (matchedOriginal ? originalSupplier.trim() : originalSupplier.trim());
     const currency = article?.currency || line.currency;
-    const group = groups.get(key) || { key, supplierName, currency, count: 0, total: 0 };
+    const group = groups.get(key) || { key, supplierName, currency, count: 0, subtotal: 0, total: 0 };
     group.count += 1;
+    group.subtotal = roundCurrency(group.subtotal + line.totalPrice);
     group.total = roundCurrency(group.total + line.totalPrice);
     groups.set(key, group);
   }
-  return [...groups.values()];
+  const result = [...groups.values()];
+  const originalSupplierGroups = result.filter((group) => normalizedName(group.supplierName) === normalizedName(originalSupplier));
+  const orderAdjustments = adjustments.filter((item) => item.scope === 'order');
+  if (originalSupplierGroups.length === 1 && originalSupplierGroups[0].currency === quoteCurrency) {
+    const adjustmentTotal = orderAdjustments.reduce((sum, item) =>
+      sum + (item.kind === 'discount' ? -item.amount : item.amount), 0);
+    originalSupplierGroups[0].total = roundCurrency(originalSupplierGroups[0].total + adjustmentTotal);
+  }
+  return result;
+}
+
+function prorateAdjustmentsForLineChange(
+  adjustments: Adjustment[],
+  previousLines: OrderLine[],
+  nextLines: OrderLine[],
+  changedIndex: number,
+  originalSupplier: string,
+  quoteCurrency: string
+): Adjustment[] {
+  const belongsToOriginalSupplier = (line: OrderLine) =>
+    line.currency === quoteCurrency
+    && (!line.selectedArticle
+      || (!!line.selectedArticle.supplier_name
+        && normalizedName(line.selectedArticle.supplier_name) === normalizedName(originalSupplier)));
+  const oldSubtotal = previousLines
+    .filter(belongsToOriginalSupplier)
+    .reduce((sum, line) => sum + line.totalPrice, 0);
+  const newSubtotal = nextLines
+    .filter(belongsToOriginalSupplier)
+    .reduce((sum, line) => sum + line.totalPrice, 0);
+  const oldLine = previousLines[changedIndex];
+  const newLine = nextLines[changedIndex];
+  return adjustments.map((adjustment) => {
+    if (adjustment.scope === 'order' && oldSubtotal > 0) {
+      return { ...adjustment, amount: roundCurrency(adjustment.amount * newSubtotal / oldSubtotal) };
+    }
+    if (adjustment.scope === 'line' && adjustment.lineIndex === changedIndex
+      && oldLine?.currency === newLine?.currency && oldLine?.totalPrice > 0) {
+      return { ...adjustment, amount: roundCurrency(adjustment.amount * newLine.totalPrice / oldLine.totalPrice) };
+    }
+    return adjustment;
+  });
 }
 
 async function classifyLineItems(
@@ -113,53 +161,88 @@ function CatalogSuggestions({
   onSelect,
   onClearSelection,
 }: CatalogSuggestionsProps) {
+  const pageSize = 8;
   const [matches, setMatches] = useState<api.ArticleMatch[]>([]);
+  const [totalMatches, setTotalMatches] = useState(0);
+  const [matchOffset, setMatchOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [searchError, setSearchError] = useState('');
-  const [dismissed, setDismissed] = useState(false);
+  const [noResults, setNoResults] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchText, setSearchText] = useState('');
-  const [refresh, setRefresh] = useState(0);
+  const [customSearch, setCustomSearch] = useState(false);
+  const [searchText, setSearchText] = useState(description);
+  const activeRequest = useRef(0);
 
   useEffect(() => {
-    if (selectedArticle) {
-      setMatches([]);
-      setLoading(false);
-      return;
-    }
-    if (!searchOpen && dismissed) {
-      setMatches([]);
-      return;
-    }
+    if (!customSearch) setSearchText(description);
+  }, [customSearch, description]);
 
-    const term = (searchOpen ? searchText : description).trim();
-    if (term.length < 2) {
-      setMatches([]);
-      setLoading(false);
-      setSearchError('');
-      return;
-    }
+  useEffect(() => {
+    if (!noResults) return;
+    const timer = window.setTimeout(() => setNoResults(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [noResults]);
 
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      setLoading(true);
-      setSearchError('');
-      api.articles.suggest({ search: term })
-        .then((result) => { if (!cancelled) setMatches(result); })
-        .catch(() => { if (!cancelled) setSearchError('Catalog suggestions are unavailable. You can still enter the item manually.'); })
-        .finally(() => { if (!cancelled) setLoading(false); });
-    }, 250);
+  useEffect(() => {
+    if (!selectedArticle) return;
+    activeRequest.current += 1;
+    setMatches([]);
+    setTotalMatches(0);
+    setMatchOffset(0);
+    setLoading(false);
+    setSearchError('');
+    setNoResults(false);
+  }, [selectedArticle]);
 
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [description, dismissed, refresh, searchOpen, searchText, selectedArticle]);
-
-  const openSearch = () => {
-    setSearchText(description);
+  const runSearch = async (value: string, offset = 0) => {
+    // A long extracted description is still useful for keyword matching, but
+    // keeping it within the API limit prevents a validation error.
+    const term = value.trim().slice(0, 1000);
+    const requestId = ++activeRequest.current;
+    setMatches([]);
+    setTotalMatches(0);
+    setMatchOffset(offset);
+    setNoResults(false);
+    setSearchError('');
     setSearchOpen(true);
-    setDismissed(false);
+    setSearchText(term);
+    if (term.length < 2) {
+      setSearchError('Enter at least two characters to search the catalog.');
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const result = await api.articles.suggest({ search: term, limit: pageSize, offset });
+      if (requestId !== activeRequest.current) return;
+      setMatches(result.items);
+      setTotalMatches(result.total);
+      setMatchOffset(result.offset);
+      setNoResults(result.total === 0);
+    } catch {
+      if (requestId === activeRequest.current) {
+        setSearchError('Catalog search is unavailable. You can still enter the item manually.');
+      }
+    } finally {
+      if (requestId === activeRequest.current) setLoading(false);
+    }
+  };
+
+  const closeResults = () => {
+    activeRequest.current += 1;
+    setMatches([]);
+    setTotalMatches(0);
+    setMatchOffset(0);
+    setNoResults(false);
+    setSearchError('');
+    setSearchOpen(false);
+    setLoading(false);
+  };
+
+  const useDescriptionSearch = () => {
+    setCustomSearch(false);
+    setSearchText(description);
   };
 
   if (selectedArticle) {
@@ -178,21 +261,27 @@ function CatalogSuggestions({
 
   return (
     <div className="mt-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button type="button" variant="outline" size="sm" onClick={openSearch}>Search catalog</Button>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <div className="flex-1">
+          <Input
+            label="Catalog search keyword"
+            helperText="Defaults to the item description. Change it to search with different words."
+            value={searchText}
+            onChange={(event) => { setCustomSearch(true); setSearchText(event.target.value); }}
+            placeholder="Article number or keywords"
+          />
+        </div>
+        <Button type="button" variant="outline" size="sm" disabled={loading} onClick={() => { void runSearch(searchText); }}>Search Catalog</Button>
+        {searchOpen && <Button type="button" variant="outline" size="sm" onClick={closeResults}>Close</Button>}
         {loading && <span className="text-xs text-ink/50">Searching catalog…</span>}
       </div>
+      {customSearch && <button type="button" className="mt-1 text-xs text-accent-deep underline" onClick={useDescriptionSearch}>Use item description</button>}
       {searchError && <p className="mt-2 text-sm text-amber-700">{searchError}</p>}
-      {searchOpen && (
-        <div className="mt-3 flex items-end gap-2">
-          <div className="flex-1"><Input label="Search this item" value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Article number or keywords" /></div>
-          <Button type="button" variant="outline" size="sm" onClick={() => setRefresh((value) => value + 1)}>Search</Button>
-          <Button type="button" variant="outline" size="sm" onClick={() => setSearchOpen(false)}>Close</Button>
-        </div>
-      )}
       {matches.length > 0 && (
         <div className="mt-3 space-y-2">
-          <p className="text-xs font-medium uppercase tracking-wide text-ink/45">Catalog suggestions</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-ink/45">
+            Catalog suggestions · showing {matchOffset + 1}–{matchOffset + matches.length} of {totalMatches}
+          </p>
           {matches.map((article) => (
             <div key={article.id} className="flex flex-col gap-3 rounded-lg border border-line bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -205,11 +294,17 @@ function CatalogSuggestions({
               <Button type="button" size="sm" onClick={() => onSelect(article)}>Use this item</Button>
             </div>
           ))}
-          <Button type="button" variant="outline" size="sm" onClick={() => { setDismissed(true); setSearchOpen(false); }}>Discard all suggestions</Button>
+          {totalMatches > pageSize && (
+            <div className="flex items-center justify-between pt-1">
+              <Button type="button" variant="outline" size="sm" disabled={loading || matchOffset === 0} onClick={() => { void runSearch(searchText, Math.max(0, matchOffset - pageSize)); }}>Previous</Button>
+              <span className="text-xs text-ink/55">Page {Math.floor(matchOffset / pageSize) + 1} of {Math.ceil(totalMatches / pageSize)}</span>
+              <Button type="button" variant="outline" size="sm" disabled={loading || matchOffset + pageSize >= totalMatches} onClick={() => { void runSearch(searchText, matchOffset + pageSize); }}>Next</Button>
+            </div>
+          )}
         </div>
       )}
-      {!loading && !searchError && searchOpen && searchText.trim().length >= 2 && matches.length === 0 && (
-        <p className="mt-3 text-sm text-ink/55">No catalog matches. You can keep the entered item or try other words.</p>
+      {noResults && (
+        <p role="status" className="mt-3 text-sm text-ink/55">No catalog matches found. You can keep the entered item or try different search terms.</p>
       )}
     </div>
   );
@@ -249,6 +344,7 @@ export default function NewRequestPage() {
   // Kept separate from the calculated total so that quote mismatches are visible.
   const [quotedTotal, setQuotedTotal] = useState(0);
   const [quoteCurrency, setQuoteCurrency] = useState('USD');
+  const [hasExtractedQuote, setHasExtractedQuote] = useState(false);
   const [discrepancyNote, setDiscrepancyNote] = useState('');
   const [requiredFields, setRequiredFields] = useState<api.ConfigurableRequiredField[]>([]);
 
@@ -259,7 +355,56 @@ export default function NewRequestPage() {
   const [formErrors, setFormErrors] = useState<FormErrors>({});
   const [extracting, setExtracting] = useState(false);
   const [classifyingCategories, setClassifyingCategories] = useState(false);
+  const [classifyingLineIds, setClassifyingLineIds] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState(false);
+  const categoryRequestIds = useRef(new Map<string, number>());
+
+  const invalidateLineClassification = (lineId: string) => {
+    categoryRequestIds.current.set(lineId, (categoryRequestIds.current.get(lineId) || 0) + 1);
+    setClassifyingLineIds((current) => {
+      if (!current.has(lineId)) return current;
+      const next = new Set(current);
+      next.delete(lineId);
+      return next;
+    });
+  };
+
+  const classifySelectedCatalogItem = async (
+    lineId: string,
+    article: api.ArticleMatch,
+    totalPrice: number
+  ) => {
+    const requestId = (categoryRequestIds.current.get(lineId) || 0) + 1;
+    categoryRequestIds.current.set(lineId, requestId);
+    setClassifyingLineIds((current) => new Set(current).add(lineId));
+    try {
+      const [assignment] = await classifyLineItems([{
+        positionDescription: article.description,
+        totalPrice,
+        currency: article.currency,
+      }]);
+      if (categoryRequestIds.current.get(lineId) !== requestId) return;
+      setOrderLines((current) => current.map((line) => {
+        if (line.localId !== lineId || line.selectedArticle?.id !== article.id) return line;
+        return {
+          ...line,
+          commodityGroupId: assignment?.status === 'assigned' ? assignment.commodityGroupId : null,
+          classificationSource: assignment?.status === 'assigned' ? 'llm' : 'manual',
+        };
+      }));
+      if (assignment?.status !== 'assigned') {
+        setWarning('Catalog item selected. Review and choose its category manually.');
+      }
+    } finally {
+      if (categoryRequestIds.current.get(lineId) === requestId) {
+        setClassifyingLineIds((current) => {
+          const next = new Set(current);
+          next.delete(lineId);
+          return next;
+        });
+      }
+    }
+  };
 
   useEffect(() => {
     api.organizations.getSettings()
@@ -268,13 +413,13 @@ export default function NewRequestPage() {
   }, []);
 
   const requestGroups = useMemo(
-    () => buildRequestGroups(orderLines, vendorName),
-    [orderLines, vendorName]
+    () => buildRequestGroups(orderLines, vendorName, adjustments, quoteCurrency),
+    [orderLines, vendorName, adjustments, quoteCurrency]
   );
   const hasCatalogSelection = orderLines.some((line) => line.selectedArticle !== null);
   const hasUnmatchedLines = orderLines.some((line) => line.selectedArticle === null);
   const hasMultipleGroups = requestGroups.length > 1;
-  const canCompareQuoteTotal = !hasCatalogSelection && !hasMultipleGroups;
+  const canCompareQuoteTotal = hasExtractedQuote && !hasCatalogSelection && !hasMultipleGroups;
 
   const calculation = useMemo(() => {
     const itemSubtotal = roundCurrency(orderLines.reduce((sum, line) => sum + line.totalPrice, 0));
@@ -337,6 +482,7 @@ export default function NewRequestPage() {
     setError('');
     setSuccess('');
     setWarning('');
+    setHasExtractedQuote(false);
     setFormErrors({});
     setExtracting(true);
 
@@ -405,6 +551,7 @@ export default function NewRequestPage() {
       setAdjustments((extracted.adjustments || []).map(normalizeAdjustment));
       setQuotedTotal(Number(extracted.totalCost) || 0);
       setQuoteCurrency(extracted.orderLines?.[0]?.currency || 'USD');
+      setHasExtractedQuote(true);
       setDiscrepancyNote('');
       applyExtractionWarnings(extractionResult.missingFields);
       setSuccess('Quote extracted. Review the fields, item categories, taxes, and discounts before creating the request.');
@@ -441,6 +588,10 @@ export default function NewRequestPage() {
   };
 
   const updateOrderLine = (index: number, field: keyof api.OrderLineInput, value: string | number) => {
+    if (['positionDescription', 'unitPrice', 'amount', 'currency'].includes(field)) {
+      const lineId = orderLines[index]?.localId;
+      if (lineId) invalidateLineClassification(lineId);
+    }
     if (field === 'currency' && !hasCatalogSelection) {
       const nextCurrency = String(value).toUpperCase().slice(0, 3);
       const allLinesWillMatch = orderLines.every((line, lineIndex) =>
@@ -448,7 +599,7 @@ export default function NewRequestPage() {
       );
       if (allLinesWillMatch) setQuoteCurrency(nextCurrency);
     }
-    setOrderLines((current) => current.map((line, lineIndex) => {
+    const nextLines = orderLines.map((line, lineIndex) => {
       if (lineIndex !== index) return line;
       const updated = { ...line, [field]: value };
       if (field === 'positionDescription') {
@@ -464,12 +615,20 @@ export default function NewRequestPage() {
         updated.totalPrice = roundCurrency(Number(updated.unitPrice) * Number(updated.amount));
       }
       return updated;
-    }));
+    });
+    setOrderLines(nextLines);
+    if (field === 'unitPrice' || field === 'amount' || field === 'totalPrice') {
+      setAdjustments((current) => prorateAdjustmentsForLineChange(
+        current, orderLines, nextLines, index, vendorName, quoteCurrency
+      ));
+    }
     clearFieldError('orderLines');
   };
 
   const selectCatalogArticle = (index: number, article: api.ArticleMatch) => {
-    setOrderLines((current) => current.map((line, lineIndex) => {
+    const selectedLine = orderLines[index];
+    if (!selectedLine) return;
+    const nextLines: OrderLine[] = orderLines.map((line, lineIndex) => {
       if (lineIndex !== index) return line;
       const originalValues = line.originalValues || {
         positionDescription: line.positionDescription,
@@ -496,7 +655,16 @@ export default function NewRequestPage() {
         commodityGroupId: null,
         classificationSource: 'manual',
       };
-    }));
+    });
+    setOrderLines(nextLines);
+    setAdjustments((current) => prorateAdjustmentsForLineChange(
+      current, orderLines, nextLines, index, vendorName, quoteCurrency
+    ));
+    void classifySelectedCatalogItem(
+      selectedLine.localId,
+      article,
+      roundCurrency(Number(article.unit_price) * Number(selectedLine.amount))
+    );
     if (orderLines.every((line, lineIndex) => lineIndex === index || line.selectedArticle !== null)) {
       clearFieldError('vendorName');
       clearFieldError('vatId');
@@ -505,7 +673,9 @@ export default function NewRequestPage() {
   };
 
   const clearCatalogArticle = (index: number) => {
-    setOrderLines((current) => current.map((line, lineIndex) => {
+    const lineId = orderLines[index]?.localId;
+    if (lineId) invalidateLineClassification(lineId);
+    const nextLines = orderLines.map((line, lineIndex) => {
       if (lineIndex !== index) return line;
       const original = line.originalValues;
       if (!original) {
@@ -523,10 +693,16 @@ export default function NewRequestPage() {
         selectedArticle: null,
         originalValues: null,
       };
-    }));
+    });
+    setOrderLines(nextLines);
+    setAdjustments((current) => prorateAdjustmentsForLineChange(
+      current, orderLines, nextLines, index, vendorName, quoteCurrency
+    ));
   };
 
   const removeOrderLine = (index: number) => {
+    const removedLineId = orderLines[index]?.localId;
+    if (removedLineId) invalidateLineClassification(removedLineId);
     setOrderLines((current) => current.filter((_, lineIndex) => lineIndex !== index));
     const remainingLines = orderLines.filter((_, lineIndex) => lineIndex !== index);
     if (remainingLines.every((line) => line.selectedArticle !== null)) {
@@ -639,6 +815,7 @@ export default function NewRequestPage() {
         vendorName,
         vatId,
         totalCost: quotedTotal,
+        hasExtractedQuote,
         sourceQuoteCurrency: quoteCurrency,
         department,
         orderLines: orderLines.map((line) => ({
@@ -749,19 +926,30 @@ export default function NewRequestPage() {
             {orderLines.map((line, index) => (
               <div key={line.localId} className="border border-gray-200 rounded-lg p-4">
                 <div className="flex items-start justify-between mb-4"><h3 className="text-sm font-medium text-gray-700">Line {index + 1}</h3><button type="button" onClick={() => removeOrderLine(index)} className="text-red-600 hover:text-red-700 text-sm">Remove</button></div>
+                <CatalogSuggestions
+                  description={line.positionDescription}
+                  selectedArticle={line.selectedArticle}
+                  onSelect={(article) => selectCatalogArticle(index, article)}
+                  onClearSelection={() => clearCatalogArticle(index)}
+                />
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4">
-                  <div className="lg:col-span-2"><Input label="Description *" value={line.positionDescription} error={formErrors[`line-${index}-description`]} disabled={!!line.selectedArticle} onChange={(event) => { updateOrderLine(index, 'positionDescription', event.target.value); clearFieldError(`line-${index}-description`); }} placeholder="Item description" /></div>
+                  <div className="lg:col-span-2">
+                    <Input label="Description *" value={line.positionDescription} error={formErrors[`line-${index}-description`]} disabled={!!line.selectedArticle} onChange={(event) => { updateOrderLine(index, 'positionDescription', event.target.value); clearFieldError(`line-${index}-description`); }} placeholder="Item description" />
+                  </div>
                   <Input label={`Unit Price (${line.currency})`} type="number" min="0" step="0.01" value={line.unitPrice} disabled={!!line.selectedArticle} onChange={(event) => updateOrderLine(index, 'unitPrice', asNumber(event.target.value))} />
                   <Input label="Amount" type="number" min="0" step="0.0001" value={line.amount} onChange={(event) => updateOrderLine(index, 'amount', asNumber(event.target.value))} />
                   <Input label="Unit *" value={line.unit} error={formErrors[`line-${index}-unit`]} disabled={!!line.selectedArticle} onChange={(event) => { updateOrderLine(index, 'unit', event.target.value); clearFieldError(`line-${index}-unit`); }} placeholder="pieces, licenses" />
                   <Input label="Currency" value={line.currency} error={formErrors[`line-${index}-currency`]} disabled={!!line.selectedArticle} maxLength={3} onChange={(event) => updateOrderLine(index, 'currency', event.target.value)} placeholder="USD" />
                 </div>
-                <div className="mt-3 flex items-center justify-between"><span className="text-sm text-gray-600">Item total</span><span className="text-lg font-semibold tracking-tight text-ink">{formatMoney(line.totalPrice, line.currency)}</span></div>
+                <div className="mt-3 max-w-sm">
+                  <Input label={`Item Total (${line.currency})`} type="number" min="0" step="0.01" value={line.totalPrice} onChange={(event) => updateOrderLine(index, 'totalPrice', asNumber(event.target.value))} helperText="Update this if the quoted line total differs from unit price × amount." />
+                </div>
                 <div className="mt-3">
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">Item Category *</label>
                   <select
                     value={line.commodityGroupId || ''}
                     onChange={(event) => {
+                      invalidateLineClassification(line.localId);
                       const groupId = Number(event.target.value) || null;
                       setOrderLines((current) => current.map((currentLine, lineIndex) => lineIndex === index
                         ? { ...currentLine, commodityGroupId: groupId, classificationSource: 'manual' }
@@ -774,15 +962,9 @@ export default function NewRequestPage() {
                     {commodityGroups?.map((group) => <option key={group.id} value={group.id}>{group.category} · {group.name}</option>)}
                   </select>
                   <p className="mt-1 text-xs text-gray-500">
-                    {formErrors[`line-${index}-category`] || (line.classificationSource === 'llm' ? 'Suggested by AI — review before saving.' : line.commodityGroupId ? 'Selected manually.' : 'Needs review.')}
+                    {formErrors[`line-${index}-category`] || (classifyingLineIds.has(line.localId) ? 'Updating category for selected catalog item…' : line.classificationSource === 'llm' ? 'Suggested by AI — review before saving.' : line.commodityGroupId ? 'Selected manually.' : 'Needs review.')}
                   </p>
                 </div>
-                <CatalogSuggestions
-                  description={line.positionDescription}
-                  selectedArticle={line.selectedArticle}
-                  onSelect={(article) => selectCatalogArticle(index, article)}
-                  onClearSelection={() => clearCatalogArticle(index)}
-                />
               </div>
             ))}
           </div>}
@@ -799,7 +981,7 @@ export default function NewRequestPage() {
             <ul className="mt-3 space-y-1 text-sm text-ink/80">
               {requestGroups.map((group) => (
                 <li key={group.key}>
-                  {group.supplierName || 'Original supplier'} · {group.count} item{group.count === 1 ? '' : 's'} · item subtotal {formatMoney(group.total, group.currency)}
+                  {group.supplierName || 'Original supplier'} · {group.count} item{group.count === 1 ? '' : 's'} · subtotal {formatMoney(group.subtotal, group.currency)} · request total {formatMoney(group.total, group.currency)}
                 </li>
               ))}
             </ul>
@@ -815,12 +997,13 @@ export default function NewRequestPage() {
         </details>
 
         <div className="bg-accent-soft/20 border-2 border-accent/40 rounded-lg p-6 space-y-4">
+          {hasCatalogSelection && <Alert variant="warning">Catalog prices changed some item amounts. Tax may depend on which items were bought, so review the tax and final request total.</Alert>}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-end">
             <Input label={`Quoted Total (${quoteCurrency})`} type="number" min="0" step="0.01" value={quotedTotal} error={formErrors.quotedTotal} onChange={(event) => { setQuotedTotal(asNumber(event.target.value)); clearFieldError('quotedTotal'); }} helperText="The final total stated in the original vendor quote." />
-            <div className="pb-1"><p className="text-sm font-medium text-ink/70">{canCompareQuoteTotal ? 'Calculated Quote Total' : 'Request totals'}</p><p className="mt-1 text-2xl font-bold text-accent-deep">{canCompareQuoteTotal ? formatMoney(calculation.total, orderLines[0]?.currency || 'USD') : 'Calculated per supplier'}</p></div>
+            <div className="pb-1"><p className="text-sm font-medium text-ink/70">{hasMultipleGroups ? 'Request totals' : hasExtractedQuote && canCompareQuoteTotal ? 'Calculated Quote Total' : 'Calculated Request Total'}</p><p className="mt-1 text-2xl font-bold text-accent-deep">{hasMultipleGroups ? 'See supplier totals above' : formatMoney(requestGroups[0]?.total ?? calculation.total, requestGroups[0]?.currency ?? orderLines[0]?.currency ?? 'USD')}</p></div>
           </div>
-          <p className="text-sm text-ink/65">{canCompareQuoteTotal ? 'Calculated from item totals and quote-level taxes, discounts, and charges.' : 'Each request is totaled using its own supplier, currency, and selected catalog prices.'}</p>
-          {hasTotalMismatch ? <div className="rounded-lg bg-red-50 border border-red-200 p-4"><p className="text-sm font-medium text-red-700">The quoted total ({formatMoney(quotedTotal, quoteCurrency)}) does not match the calculated total ({formatMoney(calculation.total, orderLines[0]?.currency || 'USD')}).</p><TextArea label="Discrepancy note *" value={discrepancyNote} error={formErrors.discrepancyNote} onChange={(event) => { setDiscrepancyNote(event.target.value); clearFieldError('discrepancyNote'); }} placeholder="Explain why the quote total differs, or correct the quoted total above." className="mt-3" /></div> : canCompareQuoteTotal ? <p className="text-sm text-green-700">Quoted total matches the selected items, taxes, and discounts.</p> : <p className="text-sm text-ink/65">The original quote total is kept for reference. Catalog selections are priced at the negotiated catalog price.</p>}
+          <p className="text-sm text-ink/65">{canCompareQuoteTotal ? 'Calculated from item totals and quote-level taxes, discounts, and charges.' : 'Each request is totaled using its own supplier, currency, item totals, and applicable adjustments.'}</p>
+          {hasTotalMismatch ? <div className="rounded-lg bg-red-50 border border-red-200 p-4"><p className="text-sm font-medium text-red-700">The quoted total ({formatMoney(quotedTotal, quoteCurrency)}) does not match the calculated total ({formatMoney(calculation.total, orderLines[0]?.currency || 'USD')}).</p><TextArea label="Discrepancy note *" value={discrepancyNote} error={formErrors.discrepancyNote} onChange={(event) => { setDiscrepancyNote(event.target.value); clearFieldError('discrepancyNote'); }} placeholder="Explain why the quote total differs, or correct the quoted total above." className="mt-3" /></div> : canCompareQuoteTotal ? <p className="text-sm text-green-700">Quoted total matches the selected items, taxes, and discounts.</p> : hasExtractedQuote ? <p className="text-sm text-ink/65">The original quote total is kept for reference. Catalog selections are priced at the negotiated catalog price.</p> : <p className="text-sm text-ink/65">The request total is calculated from the item totals and adjustments above.</p>}
         </div>
 
         <div className="flex items-center justify-end space-x-4"><Button type="button" variant="outline" onClick={() => router.back()}>Cancel</Button><Button type="submit" size="lg" disabled={submitting || extracting}>{submitting ? 'Creating…' : requestGroups.length > 1 ? `Create ${requestGroups.length} Requests` : 'Create Request'}</Button></div>

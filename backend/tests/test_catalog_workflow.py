@@ -19,7 +19,7 @@ from app.models import (
 )
 from app.routers.requests import create_request_batch
 from app.schemas.requests import RequestCreate
-from app.services.article_matching import suggest_articles
+from app.services.article_matching import suggest_article_page, suggest_articles
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def catalog_db():
             organization_id=org.id,
             article_number="DK-2",
             supplier_id=catalog_supplier.id,
-            description="USB-C docking station",
+            description="USB-C laptop docking station",
             unit_price=200,
             currency="USD",
             unit="piece",
@@ -91,6 +91,10 @@ def test_suggestions_rank_exact_article_and_match_keywords_within_org(catalog_db
     assert keyword_matches[0][0].id == article.id
     assert keyword_matches[0][1] == "keywords"
 
+    business_laptop_matches = suggest_articles(db, membership, "business laptop")
+    assert business_laptop_matches[0][0].id == article.id
+    assert business_laptop_matches[0][3] == ["business", "laptop"]
+
     alias_matches = suggest_articles(db, membership, "docking station")
     assert alias_matches[0][0].article_number == "DK-2"
 
@@ -107,6 +111,17 @@ def test_suggestions_do_not_return_another_organizations_articles(catalog_db):
 def test_suggestions_ignore_queries_without_searchable_terms(catalog_db):
     db, membership, _article, _foreign = catalog_db
     assert suggest_articles(db, membership, "the and of") == []
+
+
+def test_suggestion_pages_report_total_and_do_not_repeat_items(catalog_db):
+    db, membership, _article, _foreign = catalog_db
+
+    first_page, total = suggest_article_page(db, membership, "laptop", limit=1)
+    second_page, repeated_total = suggest_article_page(db, membership, "laptop", limit=1, offset=1)
+
+    assert total == repeated_total
+    assert total >= 2
+    assert first_page[0][0].id != second_page[0][0].id
 
 
 def _payload(lines, **overrides):

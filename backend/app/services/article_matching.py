@@ -31,7 +31,7 @@ def _tokens(value: str) -> list[str]:
             continue
         if token.endswith("ing") and len(token) > 5:
             token = token[:-3]
-        elif token.endswith("s") and len(token) > 3:
+        elif token.endswith("s") and not token.endswith("ss") and len(token) > 3:
             token = token[:-1]
         token = _ALIASES.get(token, token)
         if token and token not in result:
@@ -43,13 +43,12 @@ def _compact(value: str) -> str:
     return "".join(_TOKEN.findall(_fold(value)))
 
 
-def suggest_articles(
+def _rank_articles(
     db: Session,
     membership: OrganizationMember,
     search: str,
-    limit: int = 8,
 ) -> list[tuple[Article, str, float, list[str]]]:
-    """Return tenant-scoped results ranked by exact id, exact text, then keywords."""
+    """Rank tenant-scoped results by exact id, exact text, then keywords."""
     query_tokens = _tokens(search)
     compact_query = _compact(search)
     if not compact_query or (not query_tokens and len(compact_query) < 3):
@@ -109,4 +108,26 @@ def suggest_articles(
             match[0].article_number.casefold(),
         )
     )
-    return ranked[:limit]
+    return ranked
+
+
+def suggest_articles(
+    db: Session,
+    membership: OrganizationMember,
+    search: str,
+    limit: int = 8,
+) -> list[tuple[Article, str, float, list[str]]]:
+    """Return the first page of catalog suggestions for existing callers."""
+    return _rank_articles(db, membership, search)[:limit]
+
+
+def suggest_article_page(
+    db: Session,
+    membership: OrganizationMember,
+    search: str,
+    limit: int = 8,
+    offset: int = 0,
+) -> tuple[list[tuple[Article, str, float, list[str]]], int]:
+    """Return one page of ranked suggestions plus the total number of matches."""
+    ranked = _rank_articles(db, membership, search)
+    return ranked[offset : offset + limit], len(ranked)

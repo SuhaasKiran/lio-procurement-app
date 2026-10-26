@@ -151,7 +151,13 @@ def _validate_request_financials(
         ) from exc
 
     calculated_total = calculate_total(payload.order_lines, adjustments)
-    quoted_total = money(payload.total_cost)
+    # Manual requests do not have an extracted quote total to reconcile.
+    # Still calculate and persist their total from the entered lines.
+    quoted_total = (
+        money(payload.total_cost)
+        if getattr(payload, "has_extracted_quote", True)
+        else calculated_total
+    )
     mismatch = calculated_total != quoted_total
     note = (payload.discrepancy_note or "").strip() or None
     if mismatch and not note:
@@ -360,7 +366,7 @@ def create_request_batch(
                 unitPrice=float(article.unit_price),
                 amount=line.amount,
                 unit=article.unit,
-                totalPrice=float(money(Decimal(str(article.unit_price)) * Decimal(str(line.amount)))),
+                totalPrice=float(money(line.total_price)),
                 currency=currency,
                 catalogArticleId=article.id,
                 catalogArticleNumber=article.article_number,
@@ -471,7 +477,9 @@ def create_request_batch(
 
     # Preserve the existing quote reconciliation behavior for an unchanged,
     # single-supplier request. Changed/split requests use their own line totals.
-    preserve_quote_total = len(groups) == 1 and not any_catalog_selection
+    preserve_quote_total = (
+        payload.has_extracted_quote and len(groups) == 1 and not any_catalog_selection
+    )
     requests_to_create: list[ProcurementRequest] = []
     for group in groups.values():
         group_payload = payload.model_copy(
@@ -573,6 +581,12 @@ def create_request(
         )
     currency = _single_request_currency(payload.order_lines)
     _validate_line_categories(db, payload.order_lines)
+    if not payload.has_extracted_quote:
+        payload = payload.model_copy(update={
+            "total_cost": float(calculate_total(
+                payload.order_lines, payload.financial_breakdown.adjustments
+            ))
+        })
     _enforce_required_fields(db, membership.organization_id, payload)
     financial_breakdown, discrepancy_note = _validate_request_financials(payload)
 

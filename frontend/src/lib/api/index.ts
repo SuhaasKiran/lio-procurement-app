@@ -93,6 +93,7 @@ export interface CreateRequestInput {
   vatId: string;
   commodityGroupId?: number | null;
   totalCost: number;
+  hasExtractedQuote?: boolean;
   sourceQuoteCurrency?: string;
   department: string;
   orderLines: OrderLineInput[];
@@ -173,6 +174,13 @@ export interface ArticleMatch extends Article {
   match_type: 'article_number' | 'exact_description' | 'keywords';
   score: number;
   matched_terms: string[];
+}
+
+export interface ArticleMatchPage {
+  items: ArticleMatch[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 // ============================================================================
@@ -361,9 +369,10 @@ export const articles = {
     return apiFetch('/articles/count');
   },
 
-  suggest(params: { search: string; limit?: number }): Promise<ArticleMatch[]> {
+  suggest(params: { search: string; limit?: number; offset?: number }): Promise<ArticleMatchPage> {
     const qs = new URLSearchParams({ search: params.search });
     qs.set('limit', String(params.limit ?? 8));
+    qs.set('offset', String(params.offset ?? 0));
     return apiFetch(`/articles/suggestions?${qs.toString()}`);
   },
 };

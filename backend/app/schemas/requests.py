@@ -63,6 +63,7 @@ class RequestCreate(BaseModel):
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int | None = Field(default=None, alias="commodityGroupId")
     total_cost: float = Field(ge=0, alias="totalCost")
+    has_extracted_quote: bool = Field(default=False, alias="hasExtractedQuote")
     source_quote_currency: str | None = Field(
         default=None,
         alias="sourceQuoteCurrency",
